@@ -137,7 +137,12 @@ Build Command: pip install -r requirements.txt
 Start Command: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-After the quant service deploys, set the backend's `QUANT_SERVICE_URL` to the quant service URL. Set the frontend's `VITE_API_URL` and `VITE_WS_URL` to the backend URL.
+After the quant service deploys, set the backend's `QUANT_SERVICE_URL` to the quant service URL. Set the frontend's `VITE_API_URL` to the backend service URL, not the Vercel frontend URL. For an HTTPS backend, set `VITE_WS_URL` to the same backend host with `wss://`.
+
+```env
+VITE_API_URL=https://your-backend-service.onrender.com
+VITE_WS_URL=wss://your-backend-service.onrender.com
+```
 
 ## Manual Approval Flow
 

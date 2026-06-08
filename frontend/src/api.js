@@ -1,14 +1,24 @@
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API_URL } from './config';
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
     headers: { 'content-type': 'application/json' },
     ...options
   });
-  const data = await response.json();
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json')
+    ? await response.json()
+    : { error: await response.text() };
+
   if (!response.ok) {
-    throw new Error(data.error || data.reason || 'Request failed');
+    const detail = data.error || data.reason || `HTTP ${response.status}`;
+    throw new Error(`API request failed for ${path}: ${detail}`);
   }
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(`API request failed for ${path}: expected JSON but received ${contentType || 'unknown content type'}`);
+  }
+
   return data;
 }
 

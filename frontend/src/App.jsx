@@ -4,6 +4,7 @@ import { createChart } from 'lightweight-charts';
 import { Activity, AlertTriangle, Check, Gauge, LineChart, ListChecks, Power, RefreshCw, Settings, Shield, Wallet, X } from 'lucide-react';
 import './index.css';
 import { api } from './api';
+import { WS_URL } from './config';
 
 const money = (value) => `$${Number(value || 0).toFixed(2)}`;
 const pct = (value) => `${Number(value || 0).toFixed(2)}%`;
@@ -1799,8 +1800,7 @@ function App() {
     return () => window.clearInterval(interval);
   }, []);
   useEffect(() => {
-    const url = import.meta.env.VITE_WS_URL || 'ws://localhost:4000';
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(WS_URL);
     ws.onopen = () => setWsConnected(true);
     ws.onclose = () => setWsConnected(false);
     ws.onerror = () => setWsConnected(false);
