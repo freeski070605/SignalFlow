@@ -128,6 +128,11 @@ Start Command: npm start
 ```
 
 Also set `NODE_VERSION=22.13.0` or newer.
+Set `FRONTEND_ORIGIN` to the Vercel app origin without a trailing slash:
+
+```env
+FRONTEND_ORIGIN=https://signal-flow-gamma.vercel.app
+```
 
 Quant service Render service:
 

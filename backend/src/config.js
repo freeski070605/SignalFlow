@@ -19,6 +19,15 @@ const normalizeAlpacaBaseUrl = (value) => {
   return raw.replace(/\/v2$/i, '');
 };
 
+const normalizeOrigin = (value, fallback = 'http://localhost:5173') => {
+  const raw = String(value || fallback).trim().replace(/\/+$/, '');
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw;
+  }
+};
+
 export const config = {
   port: num(process.env.PORT, 4000),
   primaryMarket: process.env.PRIMARY_MARKET || 'crypto',
@@ -100,7 +109,7 @@ export const config = {
   quantServiceUrl: process.env.QUANT_SERVICE_URL || 'http://localhost:8000',
   mongodbUri: process.env.MONGODB_URI || '',
   mongodbDatabase: process.env.MONGODB_DATABASE || 'signalflow',
-  frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173'
+  frontendOrigin: normalizeOrigin(process.env.FRONTEND_ORIGIN)
 };
 
 export const executionMode = () => (
