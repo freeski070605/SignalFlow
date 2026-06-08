@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid';
-import { db, logEvent } from './db.js';
+import { collections, logEvent, nowIso, withoutMongoIds } from './db.js';
 import { broadcast } from './ws.js';
 
 export function emitEvent(category, event, message, payload = {}, severity = 'info') {
@@ -10,18 +10,20 @@ export function emitEvent(category, event, message, payload = {}, severity = 'in
     event,
     message,
     payload,
-    created_at: new Date().toISOString()
+    created_at: nowIso()
   };
-  db.prepare(`
-    INSERT INTO system_events (id, category, severity, event, message, payload)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(row.id, category, severity, event, message, JSON.stringify(payload));
+  collections.systemEvents.insertOne({ ...row, payload: JSON.stringify(payload) })
+    .catch((error) => console.error(`system event write failed: ${error.message}`));
   logEvent(severity === 'critical' ? 'error' : severity, event, payload);
   broadcast('event', row);
   return row;
 }
 
-export function recentEvents(limit = 100) {
-  return db.prepare('SELECT * FROM system_events ORDER BY created_at DESC LIMIT ?').all(limit)
+export async function recentEvents(limit = 100) {
+  const rows = await collections.systemEvents.find({})
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+  return withoutMongoIds(rows)
     .map((row) => ({ ...row, payload: row.payload ? JSON.parse(row.payload) : {} }));
 }

@@ -5,7 +5,7 @@ SignalFlow is a crypto-first, market-agnostic trading dashboard. Coinbase Advanc
 ## Stack
 
 - Frontend: React, Vite, Tailwind, Lightweight Charts
-- Backend: Node.js, Express, SQLite, WebSockets, Coinbase Advanced Trade API, Alpaca Trading API
+- Backend: Node.js, Express, MongoDB, WebSockets, Coinbase Advanced Trade API, Alpaca Trading API
 - Quant service: Python FastAPI
 
 ## Safety Defaults
@@ -107,6 +107,37 @@ To run the quant service by itself:
 ```bash
 python -m uvicorn main:app --app-dir quant-service --reload --host 0.0.0.0 --port 8000
 ```
+
+## Render Deployment With MongoDB Atlas
+
+SignalFlow uses MongoDB as its backend datastore. You do not need a Render persistent disk or Render Postgres.
+
+Create a MongoDB Atlas cluster, copy its connection string, and set these backend environment variables on Render:
+
+```env
+MONGODB_URI=mongodb+srv://USER:PASSWORD@HOST/?retryWrites=true&w=majority
+MONGODB_DATABASE=signalflow
+```
+
+Backend Render service:
+
+```text
+Root Directory: backend
+Build Command: npm ci
+Start Command: npm start
+```
+
+Also set `NODE_VERSION=22.13.0` or newer.
+
+Quant service Render service:
+
+```text
+Root Directory: quant-service
+Build Command: pip install -r requirements.txt
+Start Command: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+After the quant service deploys, set the backend's `QUANT_SERVICE_URL` to the quant service URL. Set the frontend's `VITE_API_URL` and `VITE_WS_URL` to the backend URL.
 
 ## Manual Approval Flow
 
@@ -215,7 +246,7 @@ ALLOW_MONITORED_FRACTIONAL_EXITS=true
 VITE_LIVE_REFRESH_MS=5000
 ```
 
-When monitored mode is used, SignalFlow stores the position, stop loss, and take profit in SQLite and checks prices on an interval. If price reaches stop or target, it submits a market sell exit. If market data becomes stale beyond the configured threshold, the position is marked `stale`, new entries are blocked, and manual attention is required.
+When monitored mode is used, SignalFlow stores the position, stop loss, and take profit in MongoDB and checks prices on an interval. If price reaches stop or target, it submits a market sell exit. If market data becomes stale beyond the configured threshold, the position is marked `stale`, new entries are blocked, and manual attention is required.
 
 `VITE_LIVE_REFRESH_MS` controls how often the frontend refreshes account/position/order snapshots. The default is 5 seconds.
 

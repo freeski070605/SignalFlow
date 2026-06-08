@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid';
-import { db, getSetting } from './db.js';
+import { collections, getSetting, nowIso, withoutMongoId, withoutMongoIds } from './db.js';
 import { latestMarketRegime } from './watchlist.js';
 import { emitEvent } from './events.js';
 
@@ -19,20 +19,16 @@ function secondsBetween(start, end) {
   return Number.isFinite(diff) ? Math.max(0, Math.round(diff / 1000)) : null;
 }
 
-function latestEntryFor(symbol, closedAt) {
-  return db.prepare(`
-    SELECT * FROM orders
-    WHERE symbol = ? AND side = 'buy' AND signal_id IS NOT NULL
-    AND datetime(created_at) <= datetime(?)
-    ORDER BY created_at DESC
-    LIMIT 1
-  `).get(symbol, closedAt);
+async function latestEntryFor(symbol, closedAt) {
+  return withoutMongoId(await collections.orders.findOne(
+    { symbol, side: 'buy', signal_id: { $ne: null }, created_at: { $lte: closedAt } },
+    { sort: { created_at: -1 } }
+  ));
 }
 
-function upsertSignalOutcome(signal, status = null) {
+async function upsertSignalOutcome(signal, status = null) {
   if (!signal) return;
-  const existing = db.prepare('SELECT signal_id FROM signal_outcomes WHERE signal_id = ?').get(signal.id);
-  const regime = latestMarketRegime();
+  const regime = await latestMarketRegime();
   const values = {
     signal_id: signal.id,
     symbol: signal.symbol,
@@ -45,34 +41,28 @@ function upsertSignalOutcome(signal, status = null) {
     market_regime: regime.regime || 'NEUTRAL',
     scanner_preset: getSetting('active_scanner_preset', 'manual'),
     status: status || signal.status,
-    outcome_checked_at: new Date().toISOString()
+    outcome_checked_at: nowIso()
   };
-  if (existing) {
-    db.prepare(`
-      UPDATE signal_outcomes
-      SET status = ?, outcome_checked_at = ?, market_regime = COALESCE(market_regime, ?), scanner_preset = COALESCE(scanner_preset, ?)
-      WHERE signal_id = ?
-    `).run(values.status, values.outcome_checked_at, values.market_regime, values.scanner_preset, signal.id);
-  } else {
-    db.prepare(`
-      INSERT INTO signal_outcomes
-      (signal_id, symbol, generated_at, direction, confidence, entry, stop_loss, take_profit, market_regime, scanner_preset, status, max_favorable_move, max_adverse_move, would_hit_target, would_hit_stop, outcome_checked_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?)
-    `).run(values.signal_id, values.symbol, values.generated_at, values.direction, values.confidence, values.entry, values.stop_loss, values.take_profit, values.market_regime, values.scanner_preset, values.status, values.outcome_checked_at);
-  }
+  await collections.signalOutcomes.updateOne(
+    { signal_id: signal.id },
+    {
+      $set: { ...values, max_favorable_move: 0, max_adverse_move: 0, would_hit_target: 0, would_hit_stop: 0 }
+    },
+    { upsert: true }
+  );
 }
 
-export function syncSignalOutcomes() {
-  const signals = db.prepare('SELECT * FROM signals ORDER BY created_at DESC LIMIT 500').all();
-  signals.forEach((signal) => upsertSignalOutcome(signal));
+export async function syncSignalOutcomes() {
+  const signals = withoutMongoIds(await collections.signals.find({}).sort({ created_at: -1 }).limit(500).toArray());
+  await Promise.all(signals.map((signal) => upsertSignalOutcome(signal)));
 }
 
-export function recordClosedTrade({ symbol, localOrderId, exitReason, order = null, position = null, protectionMode = null }) {
-  const closeRow = localOrderId ? db.prepare('SELECT * FROM orders WHERE id = ?').get(localOrderId) : null;
-  const closedAt = closeRow?.updated_at || new Date().toISOString();
-  const entryRow = latestEntryFor(symbol, closeRow?.created_at || closedAt);
-  const signal = entryRow?.signal_id ? db.prepare('SELECT * FROM signals WHERE id = ?').get(entryRow.signal_id) : null;
-  if (signal) upsertSignalOutcome(signal, 'approved');
+export async function recordClosedTrade({ symbol, localOrderId, exitReason, order = null, position = null, protectionMode = null }) {
+  const closeRow = localOrderId ? withoutMongoId(await collections.orders.findOne({ id: localOrderId })) : null;
+  const closedAt = closeRow?.updated_at || nowIso();
+  const entryRow = await latestEntryFor(symbol, closeRow?.created_at || closedAt);
+  const signal = entryRow?.signal_id ? withoutMongoId(await collections.signals.findOne({ id: entryRow.signal_id })) : null;
+  if (signal) await upsertSignalOutcome(signal, 'approved');
 
   const closeRaw = parseJson(closeRow?.raw_json);
   const sourcePosition = position || closeRaw.position || {};
@@ -91,8 +81,8 @@ export function recordClosedTrade({ symbol, localOrderId, exitReason, order = nu
   const rrPlanned = riskAmount ? rewardAmount / riskAmount : 0;
   const rrActual = riskAmount ? realizedPnl / riskAmount : 0;
   const openedAt = entryRow?.created_at || signal?.resolved_at || signal?.created_at || closeRow?.created_at;
-  const existing = closeRow ? db.prepare('SELECT * FROM trade_journal WHERE trade_id = ?').get(closeRow.id) : null;
-  const marketRegime = latestMarketRegime();
+  const existing = closeRow ? withoutMongoId(await collections.tradeJournal.findOne({ trade_id: closeRow.id })) : null;
+  const marketRegime = await latestMarketRegime();
 
   const row = {
     id: existing?.id || nanoid(),
@@ -124,60 +114,46 @@ export function recordClosedTrade({ symbol, localOrderId, exitReason, order = nu
     mistake_tags: existing?.mistake_tags || ''
   };
 
-  db.prepare(`
-    INSERT INTO trade_journal
-    (id, trade_id, signal_id, symbol, strategy_name, scanner_preset, market_regime, entry_price, exit_price, qty, notional, stop_loss, take_profit, realized_pnl, realized_pnl_percent, risk_amount, reward_amount, rr_planned, rr_actual, exit_reason, protection_mode, approved_at, opened_at, closed_at, duration_seconds, notes, mistake_tags)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(trade_id) DO UPDATE SET
-      exit_price = excluded.exit_price,
-      qty = excluded.qty,
-      notional = excluded.notional,
-      realized_pnl = excluded.realized_pnl,
-      realized_pnl_percent = excluded.realized_pnl_percent,
-      rr_actual = excluded.rr_actual,
-      exit_reason = excluded.exit_reason,
-      closed_at = excluded.closed_at,
-      duration_seconds = excluded.duration_seconds
-  `).run(...Object.values(row));
+  await collections.tradeJournal.updateOne(
+    { trade_id: row.trade_id },
+    { $set: { ...row, created_at: existing?.created_at || nowIso() } },
+    { upsert: true }
+  );
 
-  refreshPerformanceTables();
+  await refreshPerformanceTables();
   emitEvent('Journal', 'trade_journal_updated', `${symbol} journal row updated.`, { tradeId: row.trade_id, symbol, pnl: row.realized_pnl });
   return row;
 }
 
-export function syncJournalFromOrders() {
-  syncSignalOutcomes();
-  const rows = db.prepare(`
-    SELECT * FROM orders
-    WHERE status IN ('close_order_filled', 'filled')
-    AND side = 'sell'
-    ORDER BY created_at DESC
-    LIMIT 300
-  `).all();
-  rows.forEach((row) => {
+export async function syncJournalFromOrders() {
+  await syncSignalOutcomes();
+  const rows = withoutMongoIds(await collections.orders.find({ status: { $in: ['close_order_filled', 'filled'] }, side: 'sell' }).sort({ created_at: -1 }).limit(300).toArray());
+  for (const row of rows) {
     const raw = parseJson(row.raw_json);
     if (String(raw.reason || '').includes('manual_close') || String(row.alpaca_order_id || '').includes('manual-close')) {
-      recordClosedTrade({ symbol: row.symbol, localOrderId: row.id, exitReason: raw.reason || 'manual_close', order: raw.order, position: raw.position });
+      await recordClosedTrade({ symbol: row.symbol, localOrderId: row.id, exitReason: raw.reason || 'manual_close', order: raw.order, position: raw.position });
     }
-  });
+  }
 }
 
-export function journalRows() {
-  syncJournalFromOrders();
-  return db.prepare('SELECT * FROM trade_journal ORDER BY datetime(COALESCE(closed_at, created_at)) DESC').all();
+export async function journalRows() {
+  await syncJournalFromOrders();
+  const rows = withoutMongoIds(await collections.tradeJournal.find({}).toArray());
+  return rows.sort((a, b) => String(b.closed_at || b.created_at || '').localeCompare(String(a.closed_at || a.created_at || '')));
 }
 
-export function updateJournalNotes(id, { notes = '', mistake_tags = [] }) {
-  const row = db.prepare('SELECT * FROM trade_journal WHERE id = ?').get(id);
+export async function updateJournalNotes(id, { notes = '', mistake_tags = [] }) {
+  const row = withoutMongoId(await collections.tradeJournal.findOne({ id }));
   if (!row) throw new Error('Journal row not found');
   const tags = Array.isArray(mistake_tags) ? mistake_tags.filter((tag) => mistakeTags.includes(tag)) : [];
-  db.prepare('UPDATE trade_journal SET notes = ?, mistake_tags = ? WHERE id = ?').run(notes, JSON.stringify(tags), id);
+  await collections.tradeJournal.updateOne({ id }, { $set: { notes, mistake_tags: JSON.stringify(tags) } });
   emitEvent('Journal', 'journal_notes_updated', `${row.symbol} journal notes updated.`, { id, tags });
-  return db.prepare('SELECT * FROM trade_journal WHERE id = ?').get(id);
+  return withoutMongoId(await collections.tradeJournal.findOne({ id }));
 }
 
-function rowsForStats() {
-  return journalRows();
+async function rowsForStats() {
+  const rows = withoutMongoIds(await collections.tradeJournal.find({}).toArray());
+  return rows.sort((a, b) => String(b.closed_at || b.created_at || '').localeCompare(String(a.closed_at || a.created_at || '')));
 }
 
 function maxDrawdown(rows) {
@@ -223,8 +199,8 @@ function groupBy(rows, key) {
     .sort((a, b) => b.totalPnl - a.totalPnl);
 }
 
-export function performanceSummary() {
-  const rows = rowsForStats();
+export async function performanceSummary() {
+  const rows = await rowsForStats();
   const bySymbol = groupBy(rows, 'symbol');
   const byPreset = groupBy(rows, 'scanner_preset');
   return {
@@ -240,8 +216,8 @@ export function performanceSummary() {
   };
 }
 
-export function performanceDaily() {
-  const rows = rowsForStats();
+export async function performanceDaily() {
+  const rows = await rowsForStats();
   const groups = new Map();
   rows.forEach((row) => {
     const day = String(row.closed_at || row.created_at || '').slice(0, 10) || 'unknown';
@@ -250,32 +226,30 @@ export function performanceDaily() {
   return [...groups.entries()].map(([day, items]) => ({ day, ...aggregate(items) })).sort((a, b) => a.day.localeCompare(b.day));
 }
 
-export function performanceStrategy() {
-  return groupBy(rowsForStats(), 'strategy_name');
+export async function performanceStrategy() {
+  return groupBy(await rowsForStats(), 'strategy_name');
 }
 
-export function performanceSymbols() {
-  return groupBy(rowsForStats(), 'symbol');
+export async function performanceSymbols() {
+  return groupBy(await rowsForStats(), 'symbol');
 }
 
-export function signalOutcomes() {
-  syncSignalOutcomes();
-  return db.prepare('SELECT * FROM signal_outcomes ORDER BY generated_at DESC LIMIT 500').all();
+export async function signalOutcomes() {
+  await syncSignalOutcomes();
+  return withoutMongoIds(await collections.signalOutcomes.find({}).sort({ generated_at: -1 }).limit(500).toArray());
 }
 
-export function refreshPerformanceTables() {
-  const daily = performanceDaily();
-  db.prepare('DELETE FROM performance_daily').run();
-  daily.forEach((row) => {
-    db.prepare('INSERT INTO performance_daily (day, trades, wins, losses, realized_pnl, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)')
-      .run(row.day, row.totalTrades, row.wins, row.losses, row.totalPnl);
-  });
-  const strategies = performanceStrategy();
-  db.prepare('DELETE FROM strategy_stats').run();
-  strategies.forEach((row) => {
-    db.prepare('INSERT INTO strategy_stats (strategy_name, trades, wins, losses, realized_pnl, profit_factor, expectancy, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)')
-      .run(row.name, row.totalTrades, row.wins, row.losses, row.totalPnl, Number.isFinite(row.profitFactor) ? row.profitFactor : 999, row.expectancy);
-  });
+export async function refreshPerformanceTables() {
+  const daily = await performanceDaily();
+  await collections.performanceDaily.deleteMany({});
+  if (daily.length) {
+    await collections.performanceDaily.insertMany(daily.map((row) => ({ day: row.day, trades: row.totalTrades, wins: row.wins, losses: row.losses, realized_pnl: row.totalPnl, updated_at: nowIso() })));
+  }
+  const strategies = await performanceStrategy();
+  await collections.strategyStats.deleteMany({});
+  if (strategies.length) {
+    await collections.strategyStats.insertMany(strategies.map((row) => ({ strategy_name: row.name, trades: row.totalTrades, wins: row.wins, losses: row.losses, realized_pnl: row.totalPnl, profit_factor: Number.isFinite(row.profitFactor) ? row.profitFactor : 999, expectancy: row.expectancy, updated_at: nowIso() })));
+  }
 }
 
 export { mistakeTags };

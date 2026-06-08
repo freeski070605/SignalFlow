@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { db, getSetting } from './db.js';
+import { collections, getSetting } from './db.js';
 import { coinbaseCryptoAdapter } from './adapters/coinbaseCryptoAdapter.js';
 
 const num = (key, fallback) => {
@@ -16,10 +16,8 @@ export async function evaluateCryptoRisk(signal) {
   if (signal.direction === 'SELL') return { ok: true, protectionMode: 'exit_only' };
   if (signal.direction !== 'BUY') return block('Only spot BUY entries and SELL exits are supported for crypto V1.');
 
-  const dailyTrades = db.prepare(`
-    SELECT COUNT(*) AS count FROM orders
-    WHERE market_type = 'crypto' AND date(created_at) = date('now')
-  `).get().count;
+  const today = new Date().toISOString().slice(0, 10);
+  const dailyTrades = await collections.orders.countDocuments({ market_type: 'crypto', created_at: { $regex: `^${today}` } });
   if (dailyTrades >= num('crypto_daily_trade_limit', config.cryptoDailyTradeLimit)) return block('CRYPTO_DAILY_TRADE_LIMIT reached.');
 
   const positions = await coinbaseCryptoAdapter.getOpenPositions();

@@ -98,7 +98,8 @@ export const config = {
     maxResults: num(process.env.MAX_RESULTS, 50)
   },
   quantServiceUrl: process.env.QUANT_SERVICE_URL || 'http://localhost:8000',
-  databasePath: process.env.DATABASE_PATH || './data/signalflow.sqlite',
+  mongodbUri: process.env.MONGODB_URI || '',
+  mongodbDatabase: process.env.MONGODB_DATABASE || 'signalflow',
   frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173'
 };
 

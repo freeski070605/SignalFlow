@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
-import { db, getSetting, setSetting } from './db.js';
+import { collections, getSetting, nowIso, setSetting, withoutMongoIds } from './db.js';
 import { emitEvent } from './events.js';
 import { coinbaseCryptoAdapter, cryptoMajors, cryptoUniverse } from './adapters/coinbaseCryptoAdapter.js';
 
@@ -234,16 +234,17 @@ async function cryptoSafetyContext() {
   ]);
   const usd = balances.find((row) => row.asset === 'USD');
   const equity = Number(usd?.available || 0);
-  const realizedPnl = Number(db.prepare(`
-    SELECT COALESCE(SUM(realized_pnl), 0) AS pnl
-    FROM trade_journal
-    WHERE market_type = 'crypto' AND date(COALESCE(closed_at, created_at)) = date('now')
-  `).get().pnl || 0);
+  const today = new Date().toISOString().slice(0, 10);
+  const journalRows = await collections.tradeJournal.find({ market_type: 'crypto' }).toArray();
+  const realizedPnl = journalRows
+    .filter((row) => String(row.closed_at || row.created_at || '').startsWith(today))
+    .reduce((sum, row) => sum + Number(row.realized_pnl || 0), 0);
   const maxDailyLossDollars = equity > 0 ? equity * (num('crypto_max_daily_loss_percent', config.cryptoMaxDailyLossPercent) / 100) : 0;
+  const pendingSignals = await collections.signals.find({ status: 'pending', market_type: 'crypto' }, { projection: { symbol: 1 } }).toArray();
   return {
     killSwitchActive: getSetting('kill_switch', 'false') === 'true',
     openPositionSymbols: new Set(positions.map((row) => row.symbol)),
-    pendingSignalSymbols: new Set(db.prepare("SELECT symbol FROM signals WHERE status = 'pending' AND market_type = 'crypto'").all().map((row) => row.symbol)),
+    pendingSignalSymbols: new Set(pendingSignals.map((row) => row.symbol)),
     maxDailyLossHit: maxDailyLossDollars > 0 && realizedPnl <= -maxDailyLossDollars
   };
 }
@@ -439,23 +440,23 @@ function signalOpportunityMonitor(rows, scannerSettings, strategySettings) {
   };
 }
 
-function recentlySentOpportunityAlert(symbol) {
-  return Boolean(db.prepare(`
-    SELECT id FROM system_events
-    WHERE event = 'opportunity_alert'
-      AND json_extract(payload, '$.symbol') = ?
-      AND created_at >= datetime('now', '-10 minutes')
-    LIMIT 1
-  `).get(symbol));
+async function recentlySentOpportunityAlert(symbol) {
+  const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const row = await collections.systemEvents.findOne({
+    event: 'opportunity_alert',
+    created_at: { $gte: cutoff },
+    payload: { $regex: `"symbol":"${symbol}"` }
+  });
+  return Boolean(row);
 }
 
-function emitOpportunityAlerts(runId, opportunityMonitor, scannerSettings, strategySettings) {
+async function emitOpportunityAlerts(runId, opportunityMonitor, scannerSettings, strategySettings) {
   const alerts = [];
-  (opportunityMonitor?.nearMisses || []).forEach((candidate) => {
+  for (const candidate of (opportunityMonitor?.nearMisses || [])) {
     const highScore = Number(candidate.score || 0) > 75;
     const withinTenPercent = withinTenPercentOfSignalRequirements(candidate, scannerSettings, strategySettings);
-    if (!highScore && !withinTenPercent) return;
-    if (recentlySentOpportunityAlert(candidate.symbol)) return;
+    if (!highScore && !withinTenPercent) continue;
+    if (await recentlySentOpportunityAlert(candidate.symbol)) continue;
 
     const needs = (candidate.needs || []).map((need) => need.label);
     const message = `${candidate.symbol} approaching signal. Current score: ${Number(candidate.score || 0).toFixed(1)}. Needs: ${needs.join('; ') || 'final confirmation'}.`;
@@ -474,44 +475,41 @@ function emitOpportunityAlerts(runId, opportunityMonitor, scannerSettings, strat
     };
     emitEvent('Opportunity', 'opportunity_alert', message, payload, 'warn');
     alerts.push(payload);
-  });
+  }
   return alerts;
 }
 
-function persistCandidateHistory(runId, rows, opportunityMonitor) {
+async function persistCandidateHistory(runId, rows, opportunityMonitor) {
   const nearMissBySymbol = new Map((opportunityMonitor?.nearMisses || []).map((row) => [row.symbol, row]));
-  const insert = db.prepare(`
-    INSERT INTO candidate_history
-    (id, run_id, market_type, exchange, adapter_name, product_id, symbol, price, score, volume, relative_volume, momentum_15m, momentum_1h, spread_percent, probability, needs_json, signal_status, signal_generation_status, was_near_miss, outcome)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  rows.forEach((row) => {
+  if (!rows.length) return;
+  await collections.candidateHistory.insertMany(rows.map((row) => {
     const nearMiss = nearMissBySymbol.get(row.symbol);
     const indicators = row.indicators || {};
     const outcome = ['created_signal', 'discovery_risk'].includes(row.signal_generation_status) ? 'promoted_to_signal' : null;
-    insert.run(
-      nanoid(),
-      runId,
-      'crypto',
-      row.exchange || 'coinbase',
-      row.adapter_name || 'coinbase',
-      row.product_id || row.symbol,
-      row.symbol,
-      row.price || 0,
-      row.score || 0,
-      row.volume || 0,
-      row.relative_volume ?? indicators.relativeVolume ?? 0,
-      row.percent_change_15m ?? indicators.percentChange15m ?? 0,
-      row.percent_change_1h ?? indicators.percentChange1h ?? 0,
-      row.spread_percent || 0,
-      nearMiss?.probability || null,
-      JSON.stringify(nearMiss?.needs || []),
-      row.signal_status || 'NONE',
-      row.signal_generation_status || null,
-      nearMiss ? 1 : 0,
-      outcome
-    );
-  });
+    return {
+      id: nanoid(),
+      run_id: runId,
+      market_type: 'crypto',
+      exchange: row.exchange || 'coinbase',
+      adapter_name: row.adapter_name || 'coinbase',
+      product_id: row.product_id || row.symbol,
+      symbol: row.symbol,
+      price: row.price || 0,
+      score: row.score || 0,
+      volume: row.volume || 0,
+      relative_volume: row.relative_volume ?? indicators.relativeVolume ?? 0,
+      momentum_15m: row.percent_change_15m ?? indicators.percentChange15m ?? 0,
+      momentum_1h: row.percent_change_1h ?? indicators.percentChange1h ?? 0,
+      spread_percent: row.spread_percent || 0,
+      probability: nearMiss?.probability || null,
+      needs_json: JSON.stringify(nearMiss?.needs || []),
+      signal_status: row.signal_status || 'NONE',
+      signal_generation_status: row.signal_generation_status || null,
+      was_near_miss: nearMiss ? 1 : 0,
+      outcome,
+      created_at: nowIso()
+    };
+  }));
 }
 
 const toMs = (value) => {
@@ -535,28 +533,11 @@ function parseNeeds(value) {
   }
 }
 
-export function nearMissAnalytics({ limit = 18 } = {}) {
-  const rows = db.prepare(`
-    SELECT * FROM (
-      SELECT * FROM candidate_history
-      WHERE market_type = 'crypto'
-      ORDER BY created_at DESC
-      LIMIT 2000
-    )
-    ORDER BY created_at ASC
-  `).all();
-  const signals = db.prepare(`
-    SELECT id, symbol, status, created_at, resolved_at, expired_at
-    FROM signals
-    WHERE market_type = 'crypto'
-    ORDER BY created_at ASC
-  `).all();
-  const orders = db.prepare(`
-    SELECT signal_id, symbol, status, created_at
-    FROM orders
-    WHERE market_type = 'crypto'
-    ORDER BY created_at ASC
-  `).all();
+export async function nearMissAnalytics({ limit = 18 } = {}) {
+  const rows = withoutMongoIds((await collections.candidateHistory.find({ market_type: 'crypto' }).sort({ created_at: -1 }).limit(2000).toArray())
+    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || ''))));
+  const signals = withoutMongoIds(await collections.signals.find({ market_type: 'crypto' }, { projection: { id: 1, symbol: 1, status: 1, created_at: 1, resolved_at: 1, expired_at: 1 } }).sort({ created_at: 1 }).toArray());
+  const orders = withoutMongoIds(await collections.orders.find({ market_type: 'crypto' }, { projection: { signal_id: 1, symbol: 1, status: 1, created_at: 1 } }).sort({ created_at: 1 }).toArray());
   const grouped = rows.reduce((acc, row) => {
     if (!acc.has(row.symbol)) acc.set(row.symbol, []);
     acc.get(row.symbol).push(row);
@@ -657,8 +638,14 @@ export async function cryptoMarketRegime() {
   const bullish = [btc, eth].every((row) => row && row.price > row.vwap && row.ema9 > row.ema20);
   const bearish = [btc, eth].every((row) => row && row.price < row.vwap && row.ema9 < row.ema20);
   const regime = bullish ? 'BULLISH' : bearish ? 'BEARISH' : 'NEUTRAL';
-  db.prepare('INSERT INTO market_regime (id, regime, spy_status, qqq_status, details_json) VALUES (?, ?, ?, ?, ?)')
-    .run(nanoid(), regime, btc?.symbol || 'BTC-USD', eth?.symbol || 'ETH-USD', JSON.stringify({ market_type: 'crypto', exchange: 'coinbase', rows }));
+  await collections.marketRegime.insertOne({
+    id: nanoid(),
+    regime,
+    spy_status: btc?.symbol || 'BTC-USD',
+    qqq_status: eth?.symbol || 'ETH-USD',
+    details_json: JSON.stringify({ market_type: 'crypto', exchange: 'coinbase', rows }),
+    created_at: nowIso()
+  });
   return { regime, context: rows };
 }
 
@@ -856,10 +843,11 @@ export function evaluateCryptoSignalGate(row, regime, settings = cryptoStrategyS
   };
 }
 
-function saveCryptoSignal(row, regime, strategySettings, safety) {
+async function saveCryptoSignal(row, regime, strategySettings, safety) {
   const gate = evaluateCryptoSignalGate(row, regime, strategySettings, safety);
   if (!gate.wouldCreateSignal) return gate;
-  const existing = db.prepare("SELECT id FROM signals WHERE symbol = ? AND status = 'pending' AND market_type = 'crypto' AND created_at >= datetime('now', '-30 minutes')").get(row.symbol);
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const existing = await collections.signals.findOne({ symbol: row.symbol, status: 'pending', market_type: 'crypto', created_at: { $gte: cutoff } });
   if (existing) {
     const duplicateGate = { key: 'duplicate', label: 'pending crypto signal already exists for this symbol', recommendedAdjustment: recommendationForGate('duplicate', strategySettings) };
     return { ...gate, failedGates: [...(gate.failedGates || []), duplicateGate], wouldCreateSignal: false, status: 'duplicate_pending_signal', reason: duplicateGate.label, recommendedAdjustment: duplicateGate.recommendedAdjustment };
@@ -869,47 +857,62 @@ function saveCryptoSignal(row, regime, strategySettings, safety) {
   const isDiscovery = gate.status === 'discovery_risk';
   const warningLabels = (gate.failedGates || []).map((failedGate) => failedGate.label).join('; ');
   const reason = isDiscovery ? `DISCOVERY_RISK: ${warningLabels || gate.reason}` : 'Crypto EMA/VWAP/RSI momentum confirmation';
-  db.prepare(`
-    INSERT INTO signals (id, symbol, direction, entry_price, stop_loss, take_profit, confidence, reason, status, strategy, expires_at, signal_price, stale_status, market_type, exchange, base_asset, quote_asset, product_id, adapter_name)
-    VALUES (?, ?, 'BUY', ?, ?, ?, ?, ?, 'pending', 'CRYPTO_EMA_VWAP_RSI_MOMENTUM_V1', ?, ?, 'fresh', 'crypto', 'coinbase', ?, 'USD', ?, 'coinbase')
-  `).run(nanoid(), row.symbol, row.price, stop, target, Math.min(0.99, row.score / 100), reason, new Date(Date.now() + config.signalTtlSeconds * 1000).toISOString(), row.price, row.symbol.split('-')[0], row.symbol);
+  await collections.signals.insertOne({
+    id: nanoid(),
+    symbol: row.symbol,
+    direction: 'BUY',
+    entry_price: row.price,
+    stop_loss: stop,
+    take_profit: target,
+    confidence: Math.min(0.99, row.score / 100),
+    reason,
+    status: 'pending',
+    strategy: 'CRYPTO_EMA_VWAP_RSI_MOMENTUM_V1',
+    expires_at: new Date(Date.now() + config.signalTtlSeconds * 1000).toISOString(),
+    signal_price: row.price,
+    stale_status: 'fresh',
+    market_type: 'crypto',
+    exchange: 'coinbase',
+    base_asset: row.symbol.split('-')[0],
+    quote_asset: 'USD',
+    product_id: row.symbol,
+    adapter_name: 'coinbase',
+    created_at: nowIso()
+  });
   if (isDiscovery) {
-    db.prepare("UPDATE signals SET stale_status = 'DISCOVERY_RISK' WHERE symbol = ? AND status = 'pending' AND market_type = 'crypto'").run(row.symbol);
+    await collections.signals.updateMany({ symbol: row.symbol, status: 'pending', market_type: 'crypto' }, { $set: { stale_status: 'DISCOVERY_RISK' } });
   }
   return { ...gate, reason: isDiscovery ? 'DISCOVERY_RISK pending signal created; manual review required' : 'pending crypto BUY signal created' };
 }
 
-function persistCryptoCandidate(runId, row) {
-  db.prepare(`
-    INSERT INTO trading_universe_candidates
-    (id, run_id, market_type, exchange, adapter_name, product_id, symbol, name, price, percent_change, volume, average_volume, relative_volume, spread_percent, tradable, fractionable, asset_status, score, passed, reason, signal_status, indicators_json, signal_gate_json, blockers_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id || nanoid(),
-    runId,
-    'crypto',
-    'coinbase',
-    'coinbase',
-    row.product_id || row.symbol,
-    row.symbol,
-    row.product?.display_name || row.symbol,
-    row.price || 0,
-    row.percent_change_15m || 0,
-    row.volume || 0,
-    null,
-    row.relative_volume || 0,
-    row.spread_percent || 0,
-    row.tradable ? 1 : 0,
-    1,
-    row.tradable ? 'active' : 'not_tradable',
-    row.score || 0,
-    row.passed ? 1 : 0,
-    row.reason || '',
-    row.signal_status || 'NONE',
-    JSON.stringify(row.indicators || {}),
-    JSON.stringify(row.signal_gate || null),
-    JSON.stringify(row.blockers || [])
-  );
+async function persistCryptoCandidate(runId, row) {
+  await collections.tradingUniverseCandidates.insertOne({
+    id: row.id || nanoid(),
+    run_id: runId,
+    market_type: 'crypto',
+    exchange: 'coinbase',
+    adapter_name: 'coinbase',
+    product_id: row.product_id || row.symbol,
+    symbol: row.symbol,
+    name: row.product?.display_name || row.symbol,
+    price: row.price || 0,
+    percent_change: row.percent_change_15m || 0,
+    volume: row.volume || 0,
+    average_volume: null,
+    relative_volume: row.relative_volume || 0,
+    spread_percent: row.spread_percent || 0,
+    tradable: row.tradable ? 1 : 0,
+    fractionable: 1,
+    asset_status: row.tradable ? 'active' : 'not_tradable',
+    score: row.score || 0,
+    passed: row.passed ? 1 : 0,
+    reason: row.reason || '',
+    signal_status: row.signal_status || 'NONE',
+    indicators_json: JSON.stringify(row.indicators || {}),
+    signal_gate_json: JSON.stringify(row.signal_gate || null),
+    blockers_json: JSON.stringify(row.blockers || []),
+    scanned_at: nowIso()
+  });
 }
 
 export async function runCryptoScanner(options = {}) {
@@ -917,7 +920,7 @@ export async function runCryptoScanner(options = {}) {
   const strategySettings = cryptoStrategySettings();
   const effectiveStrategySettings = { ...strategySettings, min24hVolumeUsd: settings.min24hVolumeUsd };
   const runId = nanoid();
-  const blocked = new Set(db.prepare("SELECT symbol FROM watchlist_groups WHERE group_name IN ('crypto_blocked', 'blocked') AND enabled = 1").all().map((row) => row.symbol));
+  const blocked = new Set((await collections.watchlistGroups.find({ group_name: { $in: ['crypto_blocked', 'blocked'] }, enabled: 1 }).toArray()).map((row) => row.symbol));
   const productMap = await productsById().catch(() => new Map());
   const safety = { ...await cryptoSafetyContext(), blockedSymbols: blocked };
   const universe = settings.activePreset === 'crypto_conservative' ? cryptoMajors : cryptoUniverse;
@@ -930,16 +933,16 @@ export async function runCryptoScanner(options = {}) {
       rows.push({ id: nanoid(), symbol, product_id: symbol, market_type: 'crypto', exchange: 'coinbase', passed: false, reason: error.message, score: 0, price: 0, volume: 0, spread_percent: 0, relative_volume: 0, indicators: {}, candle_count: 0, tradable: false, blocked: blocked.has(symbol), error_gate: error.gate || 'missing_quote_data', passed_filters: 0, total_filters: 1, blockers: [error.message] });
     }
   }
-  rows.forEach((row) => {
+  for (const row of rows) {
     row.run_id = runId;
     const signalGeneration = row.passed
-      ? saveCryptoSignal(row, regime, effectiveStrategySettings, safety)
+      ? await saveCryptoSignal(row, regime, effectiveStrategySettings, safety)
       : evaluateCryptoSignalGate(row, regime, effectiveStrategySettings, safety);
     row.signal_status = ['created_signal', 'discovery_risk', 'duplicate_pending_signal'].includes(signalGeneration.status) ? 'BUY' : 'NONE';
     row.signal_generation_status = signalGeneration.status;
     row.signal_generation_reason = signalGeneration.reason;
     row.signal_gate = signalGeneration;
-  });
+  }
   const passed = rows.filter((row) => row.passed).sort((a, b) => b.score - a.score).slice(0, settings.maxResults);
   const rejected = rows.filter((row) => !row.passed);
   const signalGeneration = rows.filter((row) => row.passed).reduce((acc, row) => {
@@ -947,15 +950,23 @@ export async function runCryptoScanner(options = {}) {
     acc[status] = (acc[status] || 0) + 1;
     return acc;
   }, {});
-  rows.forEach((row) => persistCryptoCandidate(runId, row));
+  await Promise.all(rows.map((row) => persistCryptoCandidate(runId, row)));
   const gateSummary = signalGateSummary(rows);
   const topBlocker = topBlockerFromSummary(gateSummary);
   const opportunityMonitor = signalOpportunityMonitor(rows, settings, effectiveStrategySettings);
-  const opportunityAlerts = emitOpportunityAlerts(runId, opportunityMonitor, settings, effectiveStrategySettings);
-  persistCandidateHistory(runId, rows, opportunityMonitor);
-  const nearMissHistory = nearMissAnalytics();
-  db.prepare('INSERT INTO scanner_runs (id, status, total_scanned, passed_count, rejected_count, settings_json, completed_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)')
-    .run(runId, 'completed', rows.length, passed.length, rejected.length, JSON.stringify({ market_type: 'crypto', exchange: 'coinbase', settings, strategySettings: effectiveStrategySettings, gateSummary, topBlocker, opportunityMonitor, opportunityAlerts, nearMissHistory }));
+  const opportunityAlerts = await emitOpportunityAlerts(runId, opportunityMonitor, settings, effectiveStrategySettings);
+  await persistCandidateHistory(runId, rows, opportunityMonitor);
+  const nearMissHistory = await nearMissAnalytics();
+  await collections.scannerRuns.insertOne({
+    id: runId,
+    status: 'completed',
+    total_scanned: rows.length,
+    passed_count: passed.length,
+    rejected_count: rejected.length,
+    settings_json: JSON.stringify({ market_type: 'crypto', exchange: 'coinbase', settings, strategySettings: effectiveStrategySettings, gateSummary, topBlocker, opportunityMonitor, opportunityAlerts, nearMissHistory }),
+    created_at: nowIso(),
+    completed_at: nowIso()
+  });
   emitEvent('Scanner', 'crypto_scanner_completed', `Crypto scanner completed: ${passed.length} passed, ${rejected.length} rejected.`, { runId, market_type: 'crypto' });
   return {
     runId,
@@ -983,18 +994,17 @@ export function cryptoScannerSettingsPayload() {
   return { settings: cryptoScannerSettings(), presets: cryptoScannerPresets, universe: cryptoUniverse, focus: cryptoMajors };
 }
 
-function scannerRunSymbols(runId) {
-  const id = runId || db.prepare(`
-    SELECT id FROM scanner_runs
-    WHERE status = 'completed' AND json_extract(settings_json, '$.market_type') = 'crypto'
-    ORDER BY created_at DESC LIMIT 1
-  `).get()?.id;
+async function scannerRunSymbols(runId) {
+  const run = runId
+    ? await collections.scannerRuns.findOne({ id: runId })
+    : await collections.scannerRuns.findOne(
+      { status: 'completed', settings_json: { $regex: '"market_type":"crypto"' } },
+      { sort: { created_at: -1 } }
+    );
+  const id = run?.id;
   if (!id) throw new Error('No completed crypto scanner run found.');
-  const rows = db.prepare(`
-    SELECT DISTINCT symbol FROM trading_universe_candidates
-    WHERE run_id = ? AND market_type = 'crypto'
-    ORDER BY symbol
-  `).all(id);
+  const symbols = await collections.tradingUniverseCandidates.distinct('symbol', { run_id: id, market_type: 'crypto' });
+  const rows = symbols.sort().map((symbol) => ({ symbol }));
   if (!rows.length) throw new Error('Scanner run has no persisted crypto candidates. Run the crypto scanner again.');
   return { runId: id, symbols: rows.map((row) => row.symbol) };
 }
@@ -1014,11 +1024,11 @@ async function scoreRealRunSymbol(symbol, scannerSettings, blocked, productMap) 
 export async function debugCryptoSignal(input = {}) {
   const scannerSettings = cryptoScannerSettings();
   const strategySettings = cryptoStrategySettings();
-  const blocked = new Set(db.prepare("SELECT symbol FROM watchlist_groups WHERE group_name IN ('crypto_blocked', 'blocked') AND enabled = 1").all().map((row) => row.symbol));
+  const blocked = new Set((await collections.watchlistGroups.find({ group_name: { $in: ['crypto_blocked', 'blocked'] }, enabled: 1 }).toArray()).map((row) => row.symbol));
   const productMap = await productsById().catch(() => new Map());
   const safety = { ...await cryptoSafetyContext(), blockedSymbols: blocked };
   const regime = await cryptoMarketRegime();
-  const { runId, symbols } = scannerRunSymbols(input.runId);
+  const { runId, symbols } = await scannerRunSymbols(input.runId);
   const symbol = String(input.symbol || '').toUpperCase();
   if (!symbol || !symbols.includes(symbol)) throw new Error('Debug requires a symbol from the selected real crypto scanner run.');
   const row = await scoreRealRunSymbol(symbol, scannerSettings, blocked, productMap);
@@ -1044,11 +1054,11 @@ export async function debugCryptoSignal(input = {}) {
 
 export async function simulateCryptoSignalModes(input = {}) {
   const scannerSettings = cryptoScannerSettings();
-  const blocked = new Set(db.prepare("SELECT symbol FROM watchlist_groups WHERE group_name IN ('crypto_blocked', 'blocked') AND enabled = 1").all().map((row) => row.symbol));
+  const blocked = new Set((await collections.watchlistGroups.find({ group_name: { $in: ['crypto_blocked', 'blocked'] }, enabled: 1 }).toArray()).map((row) => row.symbol));
   const productMap = await productsById().catch(() => new Map());
   const safety = { ...await cryptoSafetyContext(), blockedSymbols: blocked };
   const regime = await cryptoMarketRegime();
-  const { runId, symbols } = scannerRunSymbols(input.runId);
+  const { runId, symbols } = await scannerRunSymbols(input.runId);
   const rows = [];
 
   for (const symbol of symbols) {

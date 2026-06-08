@@ -7,7 +7,7 @@ Stack:
 - Frontend: React + Vite + Tailwind + Lightweight Charts
 - Backend: Node.js + Express + WebSockets
 - Quant service: Python FastAPI
-- Database: SQLite using Node's built-in node:sqlite DatabaseSync
+- Database: MongoDB
 - Broker: Alpaca Trading API
 
 Core behavior:
@@ -43,7 +43,7 @@ Important files:
 - backend/src/alpaca.js: Alpaca integration
 - backend/src/risk.js: risk checks
 - backend/src/watchlist.js: watchlist scan and signal storage
-- backend/src/db.js: SQLite schema and logging
+- backend/src/db.js: MongoDB connection, indexes, settings cache, seed data, and logging
 - quant-service/main.py: FastAPI quant engine
 - frontend/src/App.jsx: React dashboard UI
 
@@ -88,12 +88,11 @@ A pasted error log exposed Alpaca API key and secret.
 Action needed:
 Rotate those keys in Alpaca before using real money.
 
-6. SQLite database is locked on nodemon restart
+6. Database restart behavior
 Problem:
-During backend reload, SQLite sometimes threw "database is locked" in migrate().
+SignalFlow originally used a local file database and could hit file locks during nodemon restarts.
 Fix:
-backend/src/db.js now sets PRAGMA busy_timeout=5000 and retries short-lived lock errors.
-It also closes the DB on SIGINT/SIGTERM.
+The backend now uses MongoDB.
 
 7. All watchlist signals showed UNAVAILABLE
 Problem:
@@ -143,7 +142,7 @@ Options going forward:
 2. Increase MAX_POSITION_NOTIONAL and position_size_cap enough to buy at least 1 whole share.
 3. Build a monitored fractional-exit mode:
    - Submit a simple fractional market/notional entry.
-   - Store stop loss and take profit in SQLite.
+   - Store stop loss and take profit in MongoDB.
    - Run a backend monitor loop against live market data.
    - Submit market exit orders when stop or target is hit.
    - This is less safe than Alpaca-native bracket orders because protection depends on SignalFlow staying online.

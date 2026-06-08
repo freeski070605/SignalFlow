@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { db, getSetting } from './db.js';
+import { collections, getSetting, nowIso, withoutMongoId } from './db.js';
 import { emitEvent } from './events.js';
 import { safeMarketRow, latestMarketRegime } from './watchlist.js';
 import { getAsset } from './alpaca.js';
@@ -24,16 +24,16 @@ export function secondsRemaining(signal) {
   return Math.max(0, Math.ceil((new Date(signal.expires_at).getTime() - Date.now()) / 1000));
 }
 
-export function expireSignal(signal, reason) {
+export async function expireSignal(signal, reason) {
   if (!signal || signal.status !== 'pending') return null;
-  db.prepare(`
-    UPDATE signals
-    SET status = 'expired', expired_at = CURRENT_TIMESTAMP, expiration_reason = ?, stale_status = 'expired', resolved_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND status = 'pending'
-  `).run(reason, signal.id);
+  const at = nowIso();
+  await collections.signals.updateOne(
+    { id: signal.id, status: 'pending' },
+    { $set: { status: 'expired', expired_at: at, expiration_reason: reason, stale_status: 'expired', resolved_at: at } }
+  );
   emitEvent('Signals', 'signal_expired', `${signal.symbol} signal expired: ${reason}.`, { signalId: signal.id, symbol: signal.symbol, reason }, 'warn');
   broadcast('signal_expired', { id: signal.id, symbol: signal.symbol, reason });
-  return db.prepare('SELECT * FROM signals WHERE id = ?').get(signal.id);
+  return withoutMongoId(await collections.signals.findOne({ id: signal.id }));
 }
 
 async function expirationReason(signal) {
@@ -50,7 +50,7 @@ async function expirationReason(signal) {
 
   const regime = signal.market_type === 'crypto'
     ? await cryptoMarketRegime().catch(() => ({ regime: 'NEUTRAL' }))
-    : latestMarketRegime();
+    : await latestMarketRegime();
   if (signal.direction === 'BUY' && regime.regime === 'BEARISH') return 'market_regime_changed';
 
   const asset = signal.market_type === 'crypto' ? { status: 'active', tradable: true } : await getAsset(signal.symbol).catch(() => null);
@@ -66,17 +66,20 @@ async function expirationReason(signal) {
 }
 
 export async function expirePendingSignals() {
-  const rows = db.prepare("SELECT * FROM signals WHERE status = 'pending' ORDER BY created_at ASC LIMIT 100").all();
+  const rows = await collections.signals.find({ status: 'pending' })
+    .sort({ created_at: 1 })
+    .limit(100)
+    .toArray();
   for (const signal of rows) {
     try {
       const remaining = secondsRemaining(signal);
       if (remaining > 0 && remaining <= 60 && signal.stale_status !== 'expiring_soon') {
-        db.prepare("UPDATE signals SET stale_status = 'expiring_soon' WHERE id = ?").run(signal.id);
+        await collections.signals.updateOne({ id: signal.id }, { $set: { stale_status: 'expiring_soon' } });
         emitEvent('Signals', 'signal_expiring_soon', `${signal.symbol} signal expires in ${remaining}s.`, { signalId: signal.id, symbol: signal.symbol, secondsRemaining: remaining }, 'warn');
         broadcast('signal_status', { id: signal.id, symbol: signal.symbol, stale_status: 'expiring_soon', secondsRemaining: remaining });
       }
       const reason = await expirationReason(signal);
-      if (reason) expireSignal(signal, reason);
+      if (reason) await expireSignal(signal, reason);
     } catch (error) {
       emitEvent('Signals', 'signal_expiration_check_failed', `${signal.symbol} expiration check failed: ${error.message}`, { signalId: signal.id }, 'warn');
     }
@@ -100,7 +103,7 @@ export async function validateSignalBeforeApproval(signal) {
 
   const reason = await expirationReason(signal);
   if (reason) {
-    expireSignal(signal, reason);
+    await expireSignal(signal, reason);
     return { ok: false, status: 409, reason };
   }
 
@@ -119,18 +122,18 @@ export async function validateSignalBeforeApproval(signal) {
   const extensionPercent = Math.abs(pctMove(signalPrice, currentPrice));
 
   if (slippagePercent > config.maxEntrySlippagePercent) {
-    db.prepare("UPDATE signals SET stale_status = 'approval_blocked_slippage' WHERE id = ?").run(signal.id);
+    await collections.signals.updateOne({ id: signal.id }, { $set: { stale_status: 'approval_blocked_slippage' } });
     emitEvent('Signals', 'approval_blocked_price_moved', `${signal.symbol} approval blocked: slippage ${slippagePercent.toFixed(2)}%.`, { signalId: signal.id, symbol: signal.symbol, slippagePercent }, 'warn');
     return { ok: false, status: 409, reason: 'approval blocked because price moved too far from review price', currentPrice, slippagePercent };
   }
 
   if (extensionPercent > config.maxExtensionFromSignalPercent) {
-    expireSignal(signal, 'price_moved_too_far');
+    await expireSignal(signal, 'price_moved_too_far');
     emitEvent('Signals', 'approval_blocked_price_moved', `${signal.symbol} approval blocked: extension ${extensionPercent.toFixed(2)}%.`, { signalId: signal.id, symbol: signal.symbol, extensionPercent }, 'warn');
     return { ok: false, status: 409, reason: 'approval blocked because price moved too far from signal price', currentPrice, extensionPercent };
   }
 
-  db.prepare("UPDATE signals SET approval_price = ?, stale_status = 'approval_validated' WHERE id = ?").run(currentPrice, signal.id);
+  await collections.signals.updateOne({ id: signal.id }, { $set: { approval_price: currentPrice, stale_status: 'approval_validated' } });
   return { ok: true, currentPrice, slippagePercent, extensionPercent };
 }
 

@@ -1,6 +1,6 @@
 import fetch from 'node-fetch';
 import { nanoid } from 'nanoid';
-import { db, getSetting, logEvent, setSetting } from './db.js';
+import { collections, getSetting, logEvent, nowIso, setSetting, withoutMongoId, withoutMongoIds } from './db.js';
 import { config } from './config.js';
 import { getAsset, getLatestQuote, getLatestSnapshot } from './alpaca.js';
 import { emitEvent } from './events.js';
@@ -226,13 +226,12 @@ export async function getMarketRegime() {
     qqq_status: qqq?.trend || 'NEUTRAL',
     details_json: JSON.stringify({ SPY: compact(spy), QQQ: compact(qqq) })
   };
-  db.prepare('INSERT INTO market_regime (id, regime, spy_status, qqq_status, details_json) VALUES (?, ?, ?, ?, ?)')
-    .run(payload.id, payload.regime, payload.spy_status, payload.qqq_status, payload.details_json);
+  await collections.marketRegime.insertOne({ ...payload, created_at: nowIso() });
   return payload;
 }
 
-export function latestMarketRegime() {
-  const row = db.prepare('SELECT * FROM market_regime ORDER BY created_at DESC LIMIT 1').get();
+export async function latestMarketRegime() {
+  const row = withoutMongoId(await collections.marketRegime.findOne({}, { sort: { created_at: -1 } }));
   return row || { regime: 'NEUTRAL', spy_status: 'NEUTRAL', qqq_status: 'NEUTRAL', details_json: '{}' };
 }
 
@@ -312,26 +311,40 @@ function tuningSuggestions(summary) {
   }).filter((value, index, array) => array.indexOf(value) === index);
 }
 
-function saveSignalIfNeeded(row, regime) {
+async function saveSignalIfNeeded(row, regime) {
   const enableContextTrading = toBool(getSetting('enable_context_symbol_trading'), config.enableContextSymbolTrading);
   const isContext = contextSymbols.includes(row.symbol);
   if (isContext && !enableContextTrading) return { status: 'skipped', reason: 'context symbol trading disabled' };
   if (row.signal?.direction !== 'BUY') return { status: 'no_signal', reason: `quant direction ${row.signal?.direction || 'NONE'}` };
   if (!['BULLISH', 'NEUTRAL'].includes(regime.regime)) return { status: 'blocked_by_regime', reason: `market regime ${regime.regime} blocks long entries` };
 
-  const existing = db.prepare(`
-    SELECT id FROM signals
-    WHERE symbol = ? AND direction = ? AND status = 'pending'
-    AND created_at >= datetime('now', '-30 minutes')
-  `).get(row.symbol, row.signal.direction);
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const existing = await collections.signals.findOne({
+    symbol: row.symbol,
+    direction: row.signal.direction,
+    status: 'pending',
+    created_at: { $gte: cutoff }
+  });
 
   if (existing) return { status: 'duplicate_pending_signal', reason: 'pending signal already exists for this symbol' };
 
   if (!existing) {
-    db.prepare(`
-      INSERT INTO signals (id, symbol, direction, entry_price, stop_loss, take_profit, confidence, reason, status, strategy, expires_at, signal_price, stale_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'EMA_VWAP_MOMENTUM_V1', ?, ?, 'fresh')
-    `).run(nanoid(), row.symbol, row.signal.direction, row.signal.entry_price, row.signal.stop_loss, row.signal.take_profit, row.signal.confidence, row.signal.reason, new Date(Date.now() + config.signalTtlSeconds * 1000).toISOString(), row.signal.entry_price);
+    await collections.signals.insertOne({
+      id: nanoid(),
+      symbol: row.symbol,
+      direction: row.signal.direction,
+      entry_price: row.signal.entry_price,
+      stop_loss: row.signal.stop_loss,
+      take_profit: row.signal.take_profit,
+      confidence: row.signal.confidence,
+      reason: row.signal.reason,
+      status: 'pending',
+      strategy: 'EMA_VWAP_MOMENTUM_V1',
+      expires_at: new Date(Date.now() + config.signalTtlSeconds * 1000).toISOString(),
+      signal_price: row.signal.entry_price,
+      stale_status: 'fresh',
+      created_at: nowIso()
+    });
     logEvent('info', 'signal_generated', { symbol: row.symbol, signal: row.signal });
   }
   return { status: 'created_signal', reason: 'pending BUY signal created' };
@@ -349,15 +362,11 @@ export async function runTradingUniverseScanner(options = {}) {
   const settings = preset ? applyScannerPreset(preset) : scannerSettings();
   const regime = await getMarketRegime();
   const runId = nanoid();
-  db.prepare('INSERT INTO scanner_runs (id, status, settings_json) VALUES (?, ?, ?)')
-    .run(runId, 'running', JSON.stringify(settings));
+  await collections.scannerRuns.insertOne({ id: runId, status: 'running', settings_json: JSON.stringify(settings), created_at: nowIso() });
   emitEvent('Scanner', 'scanner_stage', 'Fetching assets and market data.', { runId, stage: 'fetching_assets' });
 
-  const blocked = new Set(db.prepare("SELECT symbol FROM watchlist_groups WHERE group_name = 'blocked' AND enabled = 1").all().map((row) => row.symbol));
-  const seedRows = db.prepare(`
-    SELECT symbol FROM watchlist_groups
-    WHERE group_name IN ('trading_universe', 'user_added') AND enabled = 1
-  `).all();
+  const blocked = new Set((await collections.watchlistGroups.find({ group_name: 'blocked', enabled: 1 }).toArray()).map((row) => row.symbol));
+  const seedRows = await collections.watchlistGroups.find({ group_name: { $in: ['trading_universe', 'user_added'] }, enabled: 1 }).toArray();
   const symbols = [...new Set([...seedRows.map((row) => row.symbol), ...seedUniverse])].filter((symbol) => !blocked.has(symbol));
   const passedRows = [];
   const rejectedRows = [];
@@ -394,42 +403,35 @@ export async function runTradingUniverseScanner(options = {}) {
       delete dbPayload.passed_filters;
       delete dbPayload.total_filters;
       delete dbPayload.blockers;
-      db.prepare(`
-        INSERT INTO trading_universe_candidates
-        (id, run_id, symbol, name, price, percent_change, volume, average_volume, relative_volume, spread_percent, tradable, fractionable, exchange, asset_status, score, passed, reason, signal_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(...Object.values(dbPayload));
+      await collections.tradingUniverseCandidates.insertOne({ ...dbPayload, scanned_at: nowIso() });
 
       if (scored.passed) {
-        const signalGeneration = saveSignalIfNeeded(row, regime);
+        const signalGeneration = await saveSignalIfNeeded(row, regime);
         passedRows.push({ ...payload, signal: row.signal, trend: row.trend, signal_generation_status: signalGeneration.status, signal_generation_reason: signalGeneration.reason });
         emitEvent('Scanner', 'candidate_passed', `${symbol} passed scanner filters.`, { runId, symbol, score: scored.score });
       } else {
         rejected += 1;
         rejectedRows.push(payload);
-        db.prepare('INSERT INTO scanner_rejections (id, run_id, symbol, reason) VALUES (?, ?, ?, ?)')
-          .run(nanoid(), runId, symbol, scored.reason);
+        await collections.scannerRejections.insertOne({ id: nanoid(), run_id: runId, symbol, reason: scored.reason, scanned_at: nowIso() });
         emitEvent('Scanner', 'candidate_rejected', `${symbol} rejected: ${scored.reason}`, { runId, symbol, reason: scored.reason });
       }
     } catch (error) {
       rejected += 1;
       rejectedRows.push({ id: nanoid(), run_id: runId, symbol, reason: error.message, passed_filters: 0, total_filters: 1, blockers: [error.message], score: 0 });
-      db.prepare('INSERT INTO scanner_rejections (id, run_id, symbol, reason) VALUES (?, ?, ?, ?)')
-        .run(nanoid(), runId, symbol, error.message);
+      await collections.scannerRejections.insertOne({ id: nanoid(), run_id: runId, symbol, reason: error.message, scanned_at: nowIso() });
       logEvent('error', 'scanner_symbol_error', { runId, symbol, message: error.message });
     }
   }
 
   passedRows.sort((a, b) => b.score - a.score);
   const kept = passedRows.slice(0, settings.maxResults);
-  db.prepare(`
-    UPDATE scanner_runs
-    SET status = 'completed', total_scanned = ?, passed_count = ?, rejected_count = ?, completed_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(symbols.length, kept.length, rejected + Math.max(0, passedRows.length - kept.length), runId);
+  await collections.scannerRuns.updateOne(
+    { id: runId },
+    { $set: { status: 'completed', total_scanned: symbols.length, passed_count: kept.length, rejected_count: rejected + Math.max(0, passedRows.length - kept.length), completed_at: nowIso() } }
+  );
   emitEvent('Scanner', 'scanner_stage', 'Ranking candidates completed.', { runId, stage: 'completed' });
   logEvent('info', 'scanner_run_completed', { runId, scanned: symbols.length, passed: kept.length });
-  const rejections = db.prepare('SELECT * FROM scanner_rejections WHERE run_id = ? ORDER BY scanned_at DESC').all(runId);
+  const rejections = withoutMongoIds(await collections.scannerRejections.find({ run_id: runId }).sort({ scanned_at: -1 }).toArray());
   const summary = rejectionSummary(rejections);
   const signalGeneration = passedRows.reduce((acc, row) => {
     const status = row.signal_generation_status || 'unknown';
@@ -454,28 +456,26 @@ export async function runTradingUniverseScanner(options = {}) {
   };
 }
 
-export function latestTradingUniverse() {
-  return db.prepare(`
-    SELECT * FROM trading_universe_candidates
-    WHERE passed = 1 AND run_id = (SELECT id FROM scanner_runs WHERE status = 'completed' ORDER BY created_at DESC LIMIT 1)
-    ORDER BY score DESC
-  `).all();
+export async function latestTradingUniverse() {
+  const run = await collections.scannerRuns.findOne({ status: 'completed' }, { sort: { created_at: -1 } });
+  if (!run) return [];
+  return withoutMongoIds(await collections.tradingUniverseCandidates.find({ passed: 1, run_id: run.id }).sort({ score: -1 }).toArray());
 }
 
-export function scannerRuns() {
-  return db.prepare('SELECT * FROM scanner_runs ORDER BY created_at DESC LIMIT 50').all();
+export async function scannerRuns() {
+  return withoutMongoIds(await collections.scannerRuns.find({}).sort({ created_at: -1 }).limit(50).toArray());
 }
 
-export function scannerRun(id) {
+export async function scannerRun(id) {
   return {
-    run: db.prepare('SELECT * FROM scanner_runs WHERE id = ?').get(id),
-    passed: db.prepare('SELECT * FROM trading_universe_candidates WHERE run_id = ? AND passed = 1 ORDER BY score DESC').all(id),
-    rejected: db.prepare('SELECT * FROM scanner_rejections WHERE run_id = ? ORDER BY scanned_at DESC').all(id)
+    run: withoutMongoId(await collections.scannerRuns.findOne({ id })),
+    passed: withoutMongoIds(await collections.tradingUniverseCandidates.find({ run_id: id, passed: 1 }).sort({ score: -1 }).toArray()),
+    rejected: withoutMongoIds(await collections.scannerRejections.find({ run_id: id }).sort({ scanned_at: -1 }).toArray())
   };
 }
 
-export function blockedSymbols() {
-  return db.prepare("SELECT symbol, created_at FROM watchlist_groups WHERE group_name = 'blocked' AND enabled = 1 ORDER BY symbol").all();
+export async function blockedSymbols() {
+  return withoutMongoIds(await collections.watchlistGroups.find({ group_name: 'blocked', enabled: 1 }, { projection: { symbol: 1, created_at: 1 } }).sort({ symbol: 1 }).toArray());
 }
 
 export async function scanWatchlist() {

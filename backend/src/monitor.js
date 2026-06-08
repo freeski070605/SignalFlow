@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
-import { db, getSetting } from './db.js';
+import { collections, getSetting, nowIso, withoutMongoId, withoutMongoIds } from './db.js';
 import { getLatestPrice, submitMarketExitOrder } from './alpaca.js';
 import { coinbaseCryptoAdapter } from './adapters/coinbaseCryptoAdapter.js';
 import { emitEvent } from './events.js';
@@ -13,87 +13,79 @@ let lastError = null;
 
 const activeStatuses = ['pending_entry', 'open', 'stale'];
 
-export function createMonitoredPosition({ symbol, order, signal, notional, qty, marketType = signal?.market_type || 'stocks', exchange = signal?.exchange || 'alpaca', adapterName = signal?.adapter_name || exchange }) {
+export async function createMonitoredPosition({ symbol, order, signal, notional, qty, marketType = signal?.market_type || 'stocks', exchange = signal?.exchange || 'alpaca', adapterName = signal?.adapter_name || exchange }) {
   const id = nanoid();
   const [baseAsset, quoteAsset = 'USD'] = symbol.includes('-') ? symbol.split('-') : [symbol, 'USD'];
-  db.prepare(`
-    INSERT INTO monitored_positions
-    (id, market_type, exchange, adapter_name, symbol, base_asset, quote_asset, product_id, side, alpaca_order_id, entry_order_id, qty, notional, entry_price, stop_loss, take_profit, current_price, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'long', ?, ?, ?, ?, ?, ?, ?, ?, 'pending_entry')
-  `).run(
+  await collections.monitoredPositions.insertOne({
     id,
-    marketType,
+    market_type: marketType,
     exchange,
-    adapterName,
+    adapter_name: adapterName,
     symbol,
-    baseAsset,
-    quoteAsset,
-    symbol,
-    order.id,
-    order.id,
-    Number(qty),
-    Number(notional),
-    Number(signal.entry_price),
-    Number(signal.stop_loss),
-    Number(signal.take_profit),
-    Number(signal.entry_price)
-  );
+    base_asset: baseAsset,
+    quote_asset: quoteAsset,
+    product_id: symbol,
+    side: 'long',
+    alpaca_order_id: order.id,
+    entry_order_id: order.id,
+    qty: Number(qty),
+    notional: Number(notional),
+    entry_price: Number(signal.entry_price),
+    stop_loss: Number(signal.stop_loss),
+    take_profit: Number(signal.take_profit),
+    current_price: Number(signal.entry_price),
+    status: 'pending_entry',
+    opened_at: nowIso()
+  });
   emitEvent('Monitor', 'protection_assigned', `${symbol} assigned SignalFlow monitored exits.`, { id, symbol, stop_loss: signal.stop_loss, take_profit: signal.take_profit });
   return id;
 }
 
-export function monitoredPositions() {
-  return db.prepare('SELECT * FROM monitored_positions ORDER BY opened_at DESC').all();
+export async function monitoredPositions() {
+  const rows = await collections.monitoredPositions.find({}).sort({ opened_at: -1 }).toArray();
+  return withoutMongoIds(rows);
 }
 
-export function monitoredPosition(id) {
-  return db.prepare('SELECT * FROM monitored_positions WHERE id = ?').get(id);
+export async function monitoredPosition(id) {
+  return withoutMongoId(await collections.monitoredPositions.findOne({ id }));
 }
 
-export function activeMonitoredPositionForSymbol(symbol) {
-  return db.prepare(`
-    SELECT * FROM monitored_positions
-    WHERE symbol = ? AND status IN ('pending_entry', 'open', 'stale', 'manual_attention_required')
-    ORDER BY opened_at DESC
-    LIMIT 1
-  `).get(symbol);
+export async function activeMonitoredPositionForSymbol(symbol) {
+  return withoutMongoId(await collections.monitoredPositions.findOne(
+    { symbol, status: { $in: ['pending_entry', 'open', 'stale', 'manual_attention_required'] } },
+    { sort: { opened_at: -1 } }
+  ));
 }
 
-export function markManualCloseInProgress(symbol) {
-  const row = activeMonitoredPositionForSymbol(symbol);
+export async function markManualCloseInProgress(symbol) {
+  const row = await activeMonitoredPositionForSymbol(symbol);
   if (!row) return null;
-  db.prepare(`
-    UPDATE monitored_positions
-    SET status = 'exiting', exit_reason = 'manual_close', error_message = NULL
-    WHERE id = ?
-  `).run(row.id);
+  await collections.monitoredPositions.updateOne({ id: row.id }, { $set: { status: 'exiting', exit_reason: 'manual_close', error_message: null } });
   emitEvent('Monitor', 'monitored_manual_close_started', `${symbol} monitored position marked exiting for manual close.`, { id: row.id, symbol }, 'warn');
   broadcast('monitor_update', { id: row.id, symbol, status: 'exiting' });
   return monitoredPosition(row.id);
 }
 
-export function markManualCloseClosed(symbol) {
-  db.prepare(`
-    UPDATE monitored_positions
-    SET status = 'closed', closed_at = CURRENT_TIMESTAMP, error_message = NULL
-    WHERE symbol = ? AND status = 'exiting' AND exit_reason = 'manual_close'
-  `).run(symbol);
+export async function markManualCloseClosed(symbol) {
+  await collections.monitoredPositions.updateMany(
+    { symbol, status: 'exiting', exit_reason: 'manual_close' },
+    { $set: { status: 'closed', closed_at: nowIso(), error_message: null } }
+  );
   emitEvent('Monitor', 'monitored_manual_close_completed', `${symbol} monitored position marked closed after manual close.`, { symbol });
   broadcast('monitor_update', { symbol, status: 'closed' });
 }
 
-export function markManualCloseFailed(symbol, message) {
-  db.prepare(`
-    UPDATE monitored_positions
-    SET status = 'manual_attention_required', error_message = ?
-    WHERE symbol = ? AND status = 'exiting' AND exit_reason = 'manual_close'
-  `).run(message, symbol);
+export async function markManualCloseFailed(symbol, message) {
+  await collections.monitoredPositions.updateMany(
+    { symbol, status: 'exiting', exit_reason: 'manual_close' },
+    { $set: { status: 'manual_attention_required', error_message: message } }
+  );
   emitEvent('Monitor', 'monitored_manual_close_failed', `${symbol} manual close failed; monitored position needs attention.`, { symbol, error: message }, 'critical');
   broadcast('monitor_update', { symbol, status: 'manual_attention_required' });
 }
 
-export function monitorStatus() {
-  const rows = monitoredPositions();
+export async function monitorStatus() {
+  const rows = await monitoredPositions();
   return {
     running,
     intervalMs: Number(getSetting('monitored_exit_interval_ms', config.monitoredExitIntervalMs)),
@@ -113,25 +105,22 @@ function secondsSince(value) {
 
 async function exitPosition(row, reason) {
   if (row.status === 'exiting' || row.exit_order_id) return;
-  db.prepare("UPDATE monitored_positions SET status = 'exiting', exit_reason = ? WHERE id = ? AND status != 'exiting'")
-    .run(reason, row.id);
+  await collections.monitoredPositions.updateOne({ id: row.id, status: { $ne: 'exiting' } }, { $set: { status: 'exiting', exit_reason: reason } });
   emitEvent('Monitor', `${reason}_triggered`, `${row.symbol} ${reason.replace('_', ' ')} triggered.`, { id: row.id, symbol: row.symbol, current_price: row.current_price }, 'warn');
   try {
     const order = row.market_type === 'crypto'
       ? await coinbaseCryptoAdapter.submitOrder({ symbol: row.symbol, side: 'sell', qty: row.qty })
       : await submitMarketExitOrder({ symbol: row.symbol, qty: row.qty });
-    db.prepare(`
-      UPDATE monitored_positions
-      SET exit_order_id = ?, status = 'closed', closed_at = CURRENT_TIMESTAMP, error_message = NULL
-      WHERE id = ?
-    `).run(order.id, row.id);
+    await collections.monitoredPositions.updateOne(
+      { id: row.id },
+      { $set: { exit_order_id: order.id, status: 'closed', closed_at: nowIso(), error_message: null } }
+    );
     emitEvent('Orders', 'exit_order_submitted', `${row.symbol} monitored exit submitted.`, { id: row.id, orderId: order.id, reason });
   } catch (error) {
-    db.prepare(`
-      UPDATE monitored_positions
-      SET status = 'manual_attention_required', error_message = ?
-      WHERE id = ?
-    `).run(error.message, row.id);
+    await collections.monitoredPositions.updateOne(
+      { id: row.id },
+      { $set: { status: 'manual_attention_required', error_message: error.message } }
+    );
     emitEvent('Monitor', 'exit_order_failed', `${row.symbol} exit failed and needs manual attention.`, { id: row.id, error: error.message }, 'critical');
   }
 }
@@ -140,18 +129,17 @@ export async function monitorTick() {
   running = true;
   lastRunAt = new Date().toISOString();
   const maxStaleSeconds = Number(getSetting('monitored_exit_max_stale_seconds', config.monitoredExitMaxStaleSeconds));
-  const rows = db.prepare(`SELECT * FROM monitored_positions WHERE status IN (${activeStatuses.map(() => '?').join(',')})`).all(...activeStatuses);
+  const rows = withoutMongoIds(await collections.monitoredPositions.find({ status: { $in: activeStatuses } }).toArray());
 
   for (const row of rows) {
     try {
       const price = row.market_type === 'crypto'
         ? Number((await coinbaseCryptoAdapter.getTicker(row.symbol)).price)
         : await getLatestPrice(row.symbol);
-      db.prepare(`
-        UPDATE monitored_positions
-        SET current_price = ?, last_checked_at = CURRENT_TIMESTAMP, status = CASE WHEN status = 'pending_entry' OR status = 'stale' THEN 'open' ELSE status END, error_message = NULL
-        WHERE id = ?
-      `).run(price, row.id);
+      await collections.monitoredPositions.updateOne(
+        { id: row.id },
+        { $set: { current_price: price, last_checked_at: nowIso(), status: ['pending_entry', 'stale'].includes(row.status) ? 'open' : row.status, error_message: null } }
+      );
       broadcast('monitor_update', { id: row.id, symbol: row.symbol, price });
       emitEvent('Monitor', 'monitor_check', `${row.symbol} monitor checked at $${price.toFixed(2)}.`, { id: row.id, symbol: row.symbol, price });
       const updated = { ...row, current_price: price };
@@ -160,8 +148,7 @@ export async function monitorTick() {
     } catch (error) {
       lastError = error.message;
       if (secondsSince(row.last_checked_at || row.opened_at) > maxStaleSeconds) {
-        db.prepare("UPDATE monitored_positions SET status = 'stale', error_message = ? WHERE id = ?")
-          .run(error.message, row.id);
+        await collections.monitoredPositions.updateOne({ id: row.id }, { $set: { status: 'stale', error_message: error.message } });
         emitEvent('Monitor', 'monitored_position_stale', `${row.symbol} price data is stale; new entries are blocked.`, { id: row.id, error: error.message }, 'critical');
       }
     }
@@ -181,18 +168,20 @@ export function startMonitor() {
 }
 
 export async function manualExit(id) {
-  const row = monitoredPosition(id);
+  const row = await monitoredPosition(id);
   if (!row) throw new Error('Monitored position not found');
   if (row.status === 'closed') throw new Error('Position already closed');
   await exitPosition(row, 'manual_exit');
   return monitoredPosition(id);
 }
 
-export function markReviewed(id) {
-  const row = monitoredPosition(id);
+export async function markReviewed(id) {
+  const row = await monitoredPosition(id);
   if (!row) throw new Error('Monitored position not found');
-  db.prepare("UPDATE monitored_positions SET status = CASE WHEN exit_order_id IS NULL THEN 'open' ELSE status END, error_message = NULL WHERE id = ?")
-    .run(id);
+  await collections.monitoredPositions.updateOne(
+    { id },
+    { $set: { status: row.exit_order_id ? row.status : 'open', error_message: null } }
+  );
   emitEvent('Monitor', 'manual_attention_reviewed', `${row.symbol} manual attention marked reviewed.`, { id });
   return monitoredPosition(id);
 }

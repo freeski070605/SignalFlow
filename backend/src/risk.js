@@ -1,14 +1,19 @@
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
-import { db, getSetting, logEvent } from './db.js';
+import { collections, getSetting, logEvent, nowIso } from './db.js';
 import { getAccount, getOrders, getPositions } from './alpaca.js';
 
 const openOrderStatuses = new Set(['new', 'accepted', 'pending_new', 'partially_filled']);
 
 function riskBlock(signal, reason, options = {}) {
   if (!options.preview) {
-    db.prepare('INSERT INTO risk_events (id, signal_id, symbol, reason) VALUES (?, ?, ?, ?)')
-      .run(nanoid(), signal?.id || null, signal?.symbol || null, reason);
+    collections.riskEvents.insertOne({
+      id: nanoid(),
+      signal_id: signal?.id || null,
+      symbol: signal?.symbol || null,
+      reason,
+      created_at: nowIso()
+    }).catch((error) => console.error(`risk event write failed: ${error.message}`));
     logEvent('warn', 'risk_rejected_signal', { signalId: signal?.id, symbol: signal?.symbol, reason });
   }
   return { ok: false, reason };
@@ -74,7 +79,7 @@ export async function evaluateRisk(signal, options = {}) {
     return { ok: true, notional: Math.abs(Number(sameTickerPosition.market_value || 0)), exitPosition: sameTickerPosition, protectionMode: 'exit_only' };
   }
 
-  const stale = db.prepare("SELECT COUNT(*) AS count FROM monitored_positions WHERE status IN ('stale', 'manual_attention_required', 'failed')").get().count;
+  const stale = await collections.monitoredPositions.countDocuments({ status: { $in: ['stale', 'manual_attention_required', 'failed'] } });
   if (stale > 0) {
     return riskBlock(signal, 'Monitored exit state requires manual attention before new entries.', options);
   }
@@ -111,10 +116,9 @@ export async function evaluateRisk(signal, options = {}) {
   }
 
   const unrealized = openPositions.reduce((sum, position) => sum + Number(position.unrealized_pl || 0), 0);
-  const closedPnl = db.prepare(`
-    SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades
-    WHERE date(created_at) = date('now') AND status = 'closed'
-  `).get().pnl;
+  const today = new Date().toISOString().slice(0, 10);
+  const closedRows = await collections.trades.find({ status: 'closed', created_at: { $regex: `^${today}` } }).toArray();
+  const closedPnl = closedRows.reduce((sum, row) => sum + Number(row.pnl || 0), 0);
   const dailyPnl = Number(closedPnl) + unrealized;
   const dailyLossLimit = Math.max(Math.abs(config.maxDailyLoss), equity * (maxDailyLossPercent / 100));
   if (dailyPnl <= -dailyLossLimit) {
