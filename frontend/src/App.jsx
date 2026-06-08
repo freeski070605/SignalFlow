@@ -1282,6 +1282,20 @@ function MiniBars({ rows, valueKey = 'totalPnl', labelKey = 'name' }) {
 function Journal({ journal, summary, daily, strategy, symbols, outcomes, refreshJournal }) {
   const rows = journal?.rows || [];
   const tags = journal?.mistakeTags || [];
+  const outcomeRows = Array.isArray(outcomes) ? outcomes : outcomes?.rows || [];
+  const fallbackOutcomeStats = useMemo(() => {
+    const expired = outcomeRows.filter((row) => row.status === 'expired');
+    const wouldHaveWon = expired.filter((row) => row.target_hit_first).length;
+    const wouldHaveLost = expired.filter((row) => row.stop_hit_first).length;
+    const resolved = wouldHaveWon + wouldHaveLost;
+    return {
+      expiredSignals: expired.length,
+      wouldHaveWon,
+      wouldHaveLost,
+      winRateIfApproved: resolved ? (wouldHaveWon / resolved) * 100 : 0
+    };
+  }, [outcomeRows]);
+  const outcomeStats = Array.isArray(outcomes) ? fallbackOutcomeStats : outcomes?.stats || fallbackOutcomeStats;
   const [drafts, setDrafts] = useState({});
   const setDraft = (id, patch) => setDrafts((current) => ({ ...current, [id]: { ...(current[id] || {}), ...patch } }));
   const save = async (row) => {
@@ -1342,7 +1356,13 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
         }} />
       </Card>
       <Card title="Signal Outcomes" icon={Activity}>
-        <Table columns={['Symbol', 'Direction', 'Confidence', 'Status', 'Entry', 'Stop', 'Target', 'Regime', 'Generated']} rows={outcomes || []} render={(row) => (
+        <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="Expired Signals" value={outcomeStats.expiredSignals || 0} />
+          <Metric label="Would Have Won" value={outcomeStats.wouldHaveWon || 0} tone="text-gain" />
+          <Metric label="Would Have Lost" value={outcomeStats.wouldHaveLost || 0} tone="text-loss" />
+          <Metric label="Win Rate If Approved" value={`${Number(outcomeStats.winRateIfApproved || 0).toFixed(1)}%`} />
+        </div>
+        <Table columns={['Symbol', 'Direction', 'Confidence', 'Status', 'Entry', 'Stop', 'Target', 'Outcome', 'MFE', 'MAE', 'Target Hit', 'Stop Hit', 'Outcome Grade', 'Regime', 'Generated']} rows={outcomeRows} render={(row) => (
           <tr key={row.signal_id}>
             <td className="px-3 py-2 font-bold">{row.symbol}</td>
             <td className="px-3 py-2"><Badge tone={row.direction === 'BUY' ? 'good' : 'bad'}>{row.direction}</Badge></td>
@@ -1351,6 +1371,12 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
             <td className="px-3 py-2">{money(row.entry)}</td>
             <td className="px-3 py-2 text-loss">{money(row.stop_loss)}</td>
             <td className="px-3 py-2 text-gain">{money(row.take_profit)}</td>
+            <td className="px-3 py-2"><Badge tone={row.target_hit_first ? 'good' : row.stop_hit_first ? 'bad' : 'neutral'}>{String(row.outcome || 'pending_analysis').replaceAll('_', ' ')}</Badge></td>
+            <td className="px-3 py-2 text-gain">{pct(row.max_favorable_excursion ?? row.max_favorable_move)}</td>
+            <td className="px-3 py-2 text-loss">{pct(row.max_adverse_excursion ?? row.max_adverse_move)}</td>
+            <td className="px-3 py-2"><Badge tone={row.target_hit_first ? 'good' : row.would_hit_target ? 'warn' : 'neutral'}>{row.target_hit_first ? 'First' : row.would_hit_target ? 'Yes' : 'No'}</Badge></td>
+            <td className="px-3 py-2"><Badge tone={row.stop_hit_first ? 'bad' : row.would_hit_stop ? 'warn' : 'neutral'}>{row.stop_hit_first ? 'First' : row.would_hit_stop ? 'Yes' : 'No'}</Badge></td>
+            <td className="px-3 py-2"><Badge tone={['A', 'B'].includes(row.outcome_grade) ? 'good' : ['D', 'F'].includes(row.outcome_grade) ? 'bad' : 'neutral'}>{row.outcome_grade || '-'}</Badge></td>
             <td className="px-3 py-2">{row.market_regime}</td>
             <td className="px-3 py-2 text-slate-400">{row.generated_at}</td>
           </tr>

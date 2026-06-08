@@ -2,8 +2,11 @@ import { nanoid } from 'nanoid';
 import { collections, getSetting, nowIso, withoutMongoId, withoutMongoIds } from './db.js';
 import { latestMarketRegime } from './watchlist.js';
 import { emitEvent } from './events.js';
+import { coinbaseCryptoAdapter } from './adapters/coinbaseCryptoAdapter.js';
 
 const mistakeTags = ['chased', 'late entry', 'ignored regime', 'bad spread', 'exited early', 'stop too tight', 'target too far', 'manual override', 'system error'];
+let outcomeTimer = null;
+let outcomeAnalysisInFlight = false;
 
 function parseJson(value, fallback = {}) {
   try {
@@ -46,7 +49,19 @@ async function upsertSignalOutcome(signal, status = null) {
   await collections.signalOutcomes.updateOne(
     { signal_id: signal.id },
     {
-      $set: { ...values, max_favorable_move: 0, max_adverse_move: 0, would_hit_target: 0, would_hit_stop: 0 }
+      $set: values,
+      $setOnInsert: {
+        outcome: 'pending_analysis',
+        max_favorable_excursion: 0,
+        max_adverse_excursion: 0,
+        max_favorable_move: 0,
+        max_adverse_move: 0,
+        would_hit_target: false,
+        would_hit_stop: false,
+        target_hit_first: false,
+        stop_hit_first: false,
+        outcome_grade: null
+      }
     },
     { upsert: true }
   );
@@ -55,6 +70,199 @@ async function upsertSignalOutcome(signal, status = null) {
 export async function syncSignalOutcomes() {
   const signals = withoutMongoIds(await collections.signals.find({}).sort({ created_at: -1 }).limit(500).toArray());
   await Promise.all(signals.map((signal) => upsertSignalOutcome(signal)));
+  await analyzeExpiredSignalOutcomes({ limit: 100 });
+}
+
+const toMs = (value) => {
+  const ms = new Date(value || 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+};
+
+const pctChange = (from, to) => {
+  const base = Number(from || 0);
+  const next = Number(to || 0);
+  return base ? ((next - base) / base) * 100 : 0;
+};
+
+function candleHits(signal, candle) {
+  const direction = signal.direction || 'BUY';
+  const target = Number(signal.take_profit || 0);
+  const stop = Number(signal.stop_loss || 0);
+  if (direction === 'SELL') {
+    return {
+      target: target ? Number(candle.low || 0) <= target : false,
+      stop: stop ? Number(candle.high || 0) >= stop : false
+    };
+  }
+  return {
+    target: target ? Number(candle.high || 0) >= target : false,
+    stop: stop ? Number(candle.low || 0) <= stop : false
+  };
+}
+
+function candleExcursions(signal, candle) {
+  const entry = Number(signal.entry_price || signal.signal_price || 0);
+  if (signal.direction === 'SELL') {
+    return {
+      favorable: entry ? ((entry - Number(candle.low || 0)) / entry) * 100 : 0,
+      adverse: entry ? ((entry - Number(candle.high || 0)) / entry) * 100 : 0
+    };
+  }
+  return {
+    favorable: pctChange(entry, Number(candle.high || 0)),
+    adverse: pctChange(entry, Number(candle.low || 0))
+  };
+}
+
+function gradeOutcome({ targetHitFirst, stopHitFirst, immediateStopHit, maxAdverseExcursion }) {
+  if (stopHitFirst) return immediateStopHit ? 'F' : 'D';
+  if (targetHitFirst) return Number(maxAdverseExcursion || 0) < 0 ? 'B' : 'A';
+  return 'C';
+}
+
+function outcomeLabel({ targetHitFirst, stopHitFirst, targetHit, stopHit }) {
+  if (targetHitFirst) return 'would_win';
+  if (stopHitFirst) return 'would_loss';
+  if (targetHit) return 'target_hit';
+  if (stopHit) return 'stop_hit';
+  return 'no_hit';
+}
+
+async function candlesAfterSignal(signal) {
+  const generatedAt = signal.created_at || signal.generated_at;
+  const ageMs = Date.now() - toMs(generatedAt);
+  const timeframe = ageMs <= 300 * 60 * 1000 ? '1m' : '5m';
+  const candles = await coinbaseCryptoAdapter.getCandles(signal.symbol, timeframe, {
+    start: generatedAt,
+    end: nowIso(),
+    limit: 300
+  });
+  return candles.filter((row) => toMs(row.timestamp) >= toMs(generatedAt));
+}
+
+export async function analyzeExpiredSignalOutcome(signal) {
+  if (!signal || signal.status !== 'expired') return null;
+  await upsertSignalOutcome(signal, signal.status);
+
+  const entry = Number(signal.entry_price || signal.signal_price || 0);
+  if (signal.market_type !== 'crypto') {
+    await collections.signalOutcomes.updateOne(
+      { signal_id: signal.id },
+      { $set: { outcome: 'unsupported_market', outcome_checked_at: nowIso() } }
+    );
+    return withoutMongoId(await collections.signalOutcomes.findOne({ signal_id: signal.id }));
+  }
+  if (!entry || !Number(signal.stop_loss || 0) || !Number(signal.take_profit || 0)) {
+    await collections.signalOutcomes.updateOne(
+      { signal_id: signal.id },
+      { $set: { outcome: 'missing_levels', outcome_checked_at: nowIso() } }
+    );
+    return withoutMongoId(await collections.signalOutcomes.findOne({ signal_id: signal.id }));
+  }
+
+  const candles = await candlesAfterSignal(signal);
+  if (!candles.length) {
+    await collections.signalOutcomes.updateOne(
+      { signal_id: signal.id },
+      { $set: { outcome: 'waiting_for_candles', outcome_checked_at: nowIso() } }
+    );
+    return withoutMongoId(await collections.signalOutcomes.findOne({ signal_id: signal.id }));
+  }
+
+  let maxFavorableExcursion = 0;
+  let maxAdverseExcursion = 0;
+  let maxAdverseBeforeTarget = 0;
+  let targetHitAt = null;
+  let stopHitAt = null;
+
+  for (const candle of candles) {
+    const { favorable, adverse } = candleExcursions(signal, candle);
+    maxFavorableExcursion = Math.max(maxFavorableExcursion, favorable);
+    maxAdverseExcursion = Math.min(maxAdverseExcursion, adverse);
+    if (!targetHitAt) maxAdverseBeforeTarget = Math.min(maxAdverseBeforeTarget, adverse);
+
+    const hits = candleHits(signal, candle);
+    if (hits.target && !targetHitAt) targetHitAt = candle.timestamp;
+    if (hits.stop && !stopHitAt) stopHitAt = candle.timestamp;
+  }
+
+  const targetMs = toMs(targetHitAt);
+  const stopMs = toMs(stopHitAt);
+  const targetHitFirst = Boolean(targetHitAt && (!stopHitAt || targetMs < stopMs));
+  const stopHitFirst = Boolean(stopHitAt && (!targetHitAt || stopMs <= targetMs));
+  const immediateStopHit = Boolean(stopHitFirst && stopHitAt === candles[0]?.timestamp);
+  const outcome = outcomeLabel({
+    targetHitFirst,
+    stopHitFirst,
+    targetHit: Boolean(targetHitAt),
+    stopHit: Boolean(stopHitAt)
+  });
+  const outcomeGrade = gradeOutcome({
+    targetHitFirst,
+    stopHitFirst,
+    immediateStopHit,
+    maxAdverseExcursion: maxAdverseBeforeTarget
+  });
+  const checkedAt = nowIso();
+
+  await collections.signalOutcomes.updateOne(
+    { signal_id: signal.id },
+    {
+      $set: {
+        outcome,
+        max_favorable_excursion: maxFavorableExcursion,
+        max_adverse_excursion: maxAdverseExcursion,
+        max_adverse_before_target: maxAdverseBeforeTarget,
+        max_favorable_move: maxFavorableExcursion,
+        max_adverse_move: maxAdverseExcursion,
+        would_hit_target: Boolean(targetHitAt),
+        would_hit_stop: Boolean(stopHitAt),
+        target_hit_first: targetHitFirst,
+        stop_hit_first: stopHitFirst,
+        target_hit_at: targetHitAt,
+        stop_hit_at: stopHitAt,
+        outcome_grade: outcomeGrade,
+        outcome_checked_at: checkedAt,
+        analysis_window_start: candles[0]?.timestamp || signal.created_at,
+        analysis_window_end: candles.at(-1)?.timestamp || checkedAt,
+        analysis_candle_count: candles.length
+      }
+    },
+    { upsert: true }
+  );
+  return withoutMongoId(await collections.signalOutcomes.findOne({ signal_id: signal.id }));
+}
+
+export async function analyzeExpiredSignalOutcomes({ limit = 50 } = {}) {
+  if (outcomeAnalysisInFlight) return;
+  outcomeAnalysisInFlight = true;
+  try {
+    const rows = withoutMongoIds(await collections.signals.find({ status: 'expired' }).sort({ expired_at: -1, created_at: -1 }).limit(limit).toArray());
+    for (const signal of rows) {
+      try {
+        await analyzeExpiredSignalOutcome(signal);
+      } catch (error) {
+        await collections.signalOutcomes.updateOne(
+          { signal_id: signal.id },
+          { $set: { outcome: 'analysis_error', analysis_error: error.message, outcome_checked_at: nowIso() } },
+          { upsert: true }
+        );
+        emitEvent('Journal', 'signal_outcome_analysis_failed', `${signal.symbol} outcome analysis failed: ${error.message}`, { signalId: signal.id, symbol: signal.symbol }, 'warn');
+      }
+    }
+  } finally {
+    outcomeAnalysisInFlight = false;
+  }
+}
+
+export function startSignalOutcomeAnalysisJob() {
+  if (outcomeTimer) return;
+  outcomeTimer = setInterval(() => {
+    analyzeExpiredSignalOutcomes({ limit: 50 }).catch((error) => {
+      emitEvent('Journal', 'signal_outcome_analysis_job_failed', error.message, {}, 'warn');
+    });
+  }, 60_000);
+  emitEvent('Journal', 'signal_outcome_analysis_job_started', 'Signal outcome analysis job started.', { intervalMs: 60_000 });
 }
 
 export async function recordClosedTrade({ symbol, localOrderId, exitReason, order = null, position = null, protectionMode = null }) {
@@ -236,7 +444,20 @@ export async function performanceSymbols() {
 
 export async function signalOutcomes() {
   await syncSignalOutcomes();
-  return withoutMongoIds(await collections.signalOutcomes.find({}).sort({ generated_at: -1 }).limit(500).toArray());
+  const rows = withoutMongoIds(await collections.signalOutcomes.find({}).sort({ generated_at: -1 }).limit(500).toArray());
+  const expiredRows = rows.filter((row) => row.status === 'expired');
+  const wouldHaveWon = expiredRows.filter((row) => row.target_hit_first).length;
+  const wouldHaveLost = expiredRows.filter((row) => row.stop_hit_first).length;
+  const resolved = wouldHaveWon + wouldHaveLost;
+  return {
+    rows,
+    stats: {
+      expiredSignals: expiredRows.length,
+      wouldHaveWon,
+      wouldHaveLost,
+      winRateIfApproved: resolved ? (wouldHaveWon / resolved) * 100 : 0
+    }
+  };
 }
 
 export async function refreshPerformanceTables() {

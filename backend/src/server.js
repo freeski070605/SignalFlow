@@ -6,7 +6,7 @@ import { config, executionMode } from './config.js';
 import { allSettings, collections, getSetting, logEvent, migrate, nowIso, setSetting, withoutMongoId, withoutMongoIds } from './db.js';
 import { cancelOrder, closePosition, getAccount, getAsset, getMarketClock, getOrders, getPositions, submitBracketNotionalOrder, submitMarketExitOrder, submitSimpleNotionalBuyOrder } from './alpaca.js';
 import { emitEvent, recentEvents } from './events.js';
-import { journalRows, mistakeTags, performanceDaily, performanceStrategy, performanceSummary, performanceSymbols, recordClosedTrade, signalOutcomes, updateJournalNotes } from './journal.js';
+import { journalRows, mistakeTags, performanceDaily, performanceStrategy, performanceSummary, performanceSymbols, recordClosedTrade, signalOutcomes, startSignalOutcomeAnalysisJob, updateJournalNotes } from './journal.js';
 import { createMonitoredPosition, manualExit, markManualCloseClosed, markManualCloseFailed, markManualCloseInProgress, markReviewed, monitoredPosition, monitoredPositions, monitorStatus, startMonitor } from './monitor.js';
 import { evaluateRisk } from './risk.js';
 import { evaluateCryptoRisk } from './cryptoRisk.js';
@@ -956,6 +956,7 @@ server.listen(config.port, () => {
   emitEvent('System', 'server_started', `SignalFlow backend listening on ${config.port}.`, { port: config.port, mode: executionMode() });
   startMonitor();
   startSignalExpirationJob();
+  startSignalOutcomeAnalysisJob();
   startAutoCryptoScanner();
   console.log(`SignalFlow backend listening on ${config.port}`);
 });

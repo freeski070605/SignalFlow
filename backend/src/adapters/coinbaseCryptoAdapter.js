@@ -192,10 +192,12 @@ export const coinbaseCryptoAdapter = {
       raw: ticker
     };
   },
-  getCandles: async (symbol, timeframe = '5m') => {
+  getCandles: async (symbol, timeframe = '5m', options = {}) => {
     const granularity = candleGranularity(timeframe);
-    const end = Math.floor(Date.now() / 1000);
-    const start = end - granularity * 180;
+    const limit = Math.min(300, Math.max(1, Number(options.limit || 180)));
+    const end = options.end ? Math.floor(new Date(options.end).getTime() / 1000) : Math.floor(Date.now() / 1000);
+    const requestedStart = options.start ? Math.floor(new Date(options.start).getTime() / 1000) : end - granularity * limit;
+    const start = Math.max(requestedStart, end - granularity * limit);
     const rows = await publicRequest(`/products/${symbol.toUpperCase()}/candles?granularity=${granularity}&start=${start}&end=${end}`);
     return rows.map(([time, low, high, open, close, volume]) => ({
       timestamp: new Date(time * 1000).toISOString(),

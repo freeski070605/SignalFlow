@@ -6,6 +6,7 @@ import { getAsset } from './alpaca.js';
 import { coinbaseCryptoAdapter } from './adapters/coinbaseCryptoAdapter.js';
 import { cryptoMarketRegime } from './cryptoScanner.js';
 import { broadcast } from './ws.js';
+import { analyzeExpiredSignalOutcome } from './journal.js';
 
 let timer = null;
 
@@ -33,7 +34,11 @@ export async function expireSignal(signal, reason) {
   );
   emitEvent('Signals', 'signal_expired', `${signal.symbol} signal expired: ${reason}.`, { signalId: signal.id, symbol: signal.symbol, reason }, 'warn');
   broadcast('signal_expired', { id: signal.id, symbol: signal.symbol, reason });
-  return withoutMongoId(await collections.signals.findOne({ id: signal.id }));
+  const expired = withoutMongoId(await collections.signals.findOne({ id: signal.id }));
+  analyzeExpiredSignalOutcome(expired).catch((error) => {
+    emitEvent('Signals', 'signal_outcome_analysis_failed', `${signal.symbol} outcome analysis failed: ${error.message}`, { signalId: signal.id, symbol: signal.symbol }, 'warn');
+  });
+  return expired;
 }
 
 async function expirationReason(signal) {
