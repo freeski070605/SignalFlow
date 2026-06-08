@@ -1,0 +1,369 @@
+SignalFlow project handoff
+Date: June 4, 2026
+
+We built a full-stack trading dashboard called SignalFlow.
+
+Stack:
+- Frontend: React + Vite + Tailwind + Lightweight Charts
+- Backend: Node.js + Express + WebSockets
+- Quant service: Python FastAPI
+- Database: SQLite using Node's built-in node:sqlite DatabaseSync
+- Broker: Alpaca Trading API
+
+Core behavior:
+- The app connects to Alpaca, displays account data, positions, orders, and watchlist market data.
+- It scans a default watchlist: SPY, QQQ, NVDA, AMD, TSLA, AAPL, MSFT.
+- It calculates EMA 9, EMA 20, VWAP, recent volume average, confidence score, stop loss, and take profit.
+- Strategy V1 generates BUY signals when price is above VWAP, EMA 9 is above EMA 20, price breaks a recent 5-minute high, and volume is above recent average.
+- SELL signals are treated as exit-only signals.
+- The frontend has Dashboard, Watchlist, Signals, Trades, and Strategy Settings pages.
+- The Signals page has manual Approve/Reject buttons and a Scan Watchlist button.
+
+Safety model:
+- The app defaults to SAFE_MANUAL_APPROVAL mode.
+- AUTO_EXECUTION defaults to false.
+- The backend blocks autonomous execution unless AUTO_EXECUTION=true is explicitly set in .env.
+- Every approved order goes through a backend risk check.
+- Risk checks include:
+  - emergency kill switch
+  - max position notional
+  - max trade risk
+  - max daily loss
+  - max open positions
+  - duplicate open order prevention
+  - stop loss and take profit requirement
+  - SELL signals require an existing long position
+- The kill switch disables trading immediately.
+- Signals, rejects, approvals, order attempts, errors, and system events are logged.
+
+Important files:
+- README.md: setup and safety notes
+- .env.example: environment variables
+- backend/src/server.js: Express API routes
+- backend/src/alpaca.js: Alpaca integration
+- backend/src/risk.js: risk checks
+- backend/src/watchlist.js: watchlist scan and signal storage
+- backend/src/db.js: SQLite schema and logging
+- quant-service/main.py: FastAPI quant engine
+- frontend/src/App.jsx: React dashboard UI
+
+Issues encountered and fixes:
+
+1. PowerShell blocked npm.ps1
+Problem:
+PowerShell gave "npm.ps1 cannot be loaded because running scripts is disabled".
+Fix:
+Use npm.cmd instead:
+  npm.cmd install
+  npm.cmd run install:all
+  npm.cmd run dev
+README was updated with Windows-safe commands.
+
+2. PowerShell blocked venv Activate.ps1
+Problem:
+PowerShell blocked .venv\Scripts\Activate.ps1.
+Fix:
+Use the venv Python directly instead of activation:
+  .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+README was updated with this approach.
+
+3. Port conflicts
+Problem:
+Old dev services were still running, causing EADDRINUSE on port 4000 and Vite to move from 5173 to 5174.
+Fix:
+Stop old Node/Python dev processes or Ctrl+C the existing npm dev session before restarting.
+
+4. Alpaca base URL double /v2
+Problem:
+The app called:
+  https://paper-api.alpaca.markets/v2/v2/orders
+because ALPACA_BASE_URL included /v2 and the Alpaca SDK added /v2 again.
+Fix:
+backend/src/config.js now normalizes ALPACA_BASE_URL and strips trailing /v2.
+README says not to include /v2.
+
+5. Sensitive Alpaca keys appeared in pasted logs
+Problem:
+A pasted error log exposed Alpaca API key and secret.
+Action needed:
+Rotate those keys in Alpaca before using real money.
+
+6. SQLite database is locked on nodemon restart
+Problem:
+During backend reload, SQLite sometimes threw "database is locked" in migrate().
+Fix:
+backend/src/db.js now sets PRAGMA busy_timeout=5000 and retries short-lived lock errors.
+It also closes the DB on SIGINT/SIGTERM.
+
+7. All watchlist signals showed UNAVAILABLE
+Problem:
+Alpaca rejected recent SIP market data:
+  subscription does not permit querying recent SIP data
+Fix:
+Default data feed was changed to IEX:
+  ALPACA_DATA_FEED=iex
+backend/src/alpaca.js sends feed: config.alpacaDataFeed to getBarsV2.
+The Watchlist UI now shows a Data column with alpaca or fallback.
+
+8. Could not select actions on signals
+Problem:
+Action buttons were tiny icon-only buttons at the far right of a wide table.
+Fix:
+Signals page now has explicit Approve and Reject buttons, pending count, row-level error messages, and a Scan Watchlist button.
+
+9. Alpaca order submission failed (422): [object Object]
+Problem:
+Alpaca returned a structured error object, but the app formatted it as [object Object].
+Fix:
+backend/src/alpaca.js now formats Alpaca errors into readable messages.
+
+10. SELL signals tried to submit orders without positions
+Problem:
+SELL strategy signals are really exit signals. If there is no current long position, submitting a sell order is wrong and could imply short behavior.
+Fix:
+backend/src/risk.js blocks SELL approvals unless there is an existing long position in that symbol.
+SELL signals are exit-only in V1.
+
+11. Alpaca rejects fractional bracket orders
+Problem:
+With small caps like MAX_POSITION_NOTIONAL=5, SPY/QQQ orders require fractional shares.
+Alpaca returned:
+  fractional orders must be simple orders
+This means Alpaca does not support fractional bracket orders.
+Fix:
+The backend now blocks BUY approvals before submitting to Alpaca if the position cap buys less than 1 whole share.
+The risk message explains:
+  Alpaca does not support fractional bracket orders. Increase position size enough for at least 1 whole share, use a lower-priced ticker, or add a monitored-exit mode.
+
+Current limitation:
+SignalFlow V1 requires protected orders with stop loss and take profit. Because Alpaca rejects fractional bracket orders, a tiny account cannot safely submit protected bracket entries for high-priced tickers like SPY or QQQ with only $5 notional.
+
+Options going forward:
+1. Use lower-priced tickers where the cap can buy at least 1 whole share.
+2. Increase MAX_POSITION_NOTIONAL and position_size_cap enough to buy at least 1 whole share.
+3. Build a monitored fractional-exit mode:
+   - Submit a simple fractional market/notional entry.
+   - Store stop loss and take profit in SQLite.
+   - Run a backend monitor loop against live market data.
+   - Submit market exit orders when stop or target is hit.
+   - This is less safe than Alpaca-native bracket orders because protection depends on SignalFlow staying online.
+
+Current recommended next step:
+Build monitored fractional-exit mode only if the user accepts that it is less safe than native Alpaca bracket orders. Keep SAFE_MANUAL_APPROVAL default and keep AUTO_EXECUTION=false unless explicitly enabled.
+
+June 4, 2026 update:
+SignalFlow was upgraded from a hardcoded small-account watchlist into a scalable watchlist and trading-universe architecture.
+
+New architecture:
+- Market Context Watchlist:
+  SPY, QQQ, IWM, DIA, NVDA, AMD, AAPL, MSFT
+- Trading Universe scanner:
+  Seed symbols include SOFI, PLTR, RIVN, LCID, F, PFE, NIO, HOOD, SNAP, INTC, AMD, TSLA, AAPL, MSFT, NVDA, MARA, RIOT, BAC, T, WBD.
+- Context symbols are for regime and confirmation by default, not trade generation.
+- ENABLE_CONTEXT_SYMBOL_TRADING=false by default.
+
+New database tables:
+- watchlist_groups
+- trading_universe_candidates
+- scanner_runs
+- scanner_rejections
+- market_regime
+
+New backend routes:
+- GET /api/watchlists
+- GET /api/watchlists/context
+- GET /api/watchlists/trading-universe
+- POST /api/scanner/run
+- GET /api/scanner/runs
+- GET /api/scanner/runs/:id
+- POST /api/watchlists/:symbol/add
+- DELETE /api/watchlists/:symbol
+- POST /api/watchlists/:symbol/block
+- POST /api/watchlists/:symbol/unblock
+- GET /api/market-regime
+
+Market regime:
+- BULLISH if SPY or QQQ price > VWAP and EMA 9 > EMA 20.
+- BEARISH if SPY or QQQ price < VWAP and EMA 9 < EMA 20.
+- NEUTRAL otherwise.
+
+Position sizing was changed from fixed-dollar sizing to account-based sizing:
+- risk_amount = account_equity * (RISK_PER_TRADE_PERCENT / 100)
+- stop_distance = abs(entry_price - stop_loss)
+- ideal_quantity = risk_amount / stop_distance
+- max_notional = account_equity * (MAX_ACCOUNT_POSITION_PERCENT / 100)
+- final_notional = min(ideal_quantity * entry_price, max_notional)
+
+Frontend update:
+- Watchlist page now has tabs:
+  1. Market Context
+  2. Trading Universe
+  3. Scanner Results
+  4. Blocked Symbols
+- Dashboard now shows market regime and sizing metrics.
+- Trading Universe tab shows score, relative volume, spread, tradable/fractionable badges, and signal status.
+- Scanner Results tab shows passed and rejected candidates with reasons.
+
+Important current limitation:
+The scanner can reject all symbols with strict default filters, especially when using Alpaca IEX data where observed intraday volume may be lower than full-market SIP volume. Rejection reasons are stored and shown so filters can be tuned.
+
+Phase 2 update:
+SignalFlow now includes Mission Control and Monitored Fractional Exit Mode.
+
+New environment variables:
+- PROTECTION_MODE=auto
+- MONITORED_EXIT_INTERVAL_MS=5000
+- MONITORED_EXIT_MAX_STALE_SECONDS=20
+- ALLOW_MONITORED_FRACTIONAL_EXITS=true
+
+Protection mode behavior:
+- Whole-share quantity uses native Alpaca bracket orders.
+- Fractional quantity uses monitored fractional exits if enabled.
+- If fractional quantity is required and monitored exits are disabled, the trade is blocked.
+
+New table:
+- monitored_positions
+- system_events
+
+Monitored position statuses:
+- pending_entry
+- open
+- exiting
+- closed
+- failed
+- stale
+- manual_attention_required
+
+New monitor service:
+- Starts with the backend.
+- Polls monitored positions every MONITORED_EXIT_INTERVAL_MS.
+- Fetches current price.
+- Updates current_price and last_checked_at.
+- Submits market sell if current_price <= stop_loss.
+- Submits market sell if current_price >= take_profit.
+- Prevents duplicate exits by checking status and exit_order_id.
+- Marks stale/manual_attention_required when data or exits fail.
+
+New APIs:
+- GET /api/events
+- GET /api/market-clock
+- GET /api/monitor/status
+- GET /api/monitored-positions
+- GET /api/monitored-positions/:id
+- POST /api/monitored-positions/:id/exit
+- POST /api/monitored-positions/:id/mark-reviewed
+
+Mission Control UI:
+- Global status header visible across pages.
+- Shows Alpaca connection, feed, market clock, regime, trading mode, protection mode, scanner state, and WebSocket state.
+- Live Activity feed shows scanner, signals, orders, risk, monitor, and system events.
+- Dashboard includes Protection Status.
+- Trades page includes Monitored Positions with manual exit button.
+
+Verification performed:
+- Backend syntax checks passed.
+- Frontend build passed.
+- /api/monitor/status works.
+- /api/monitored-positions works.
+- /api/events works.
+- /api/market-clock works.
+- Existing whole-share SPY approval used native Alpaca bracket protection.
+
+Remaining limitation:
+Monitored fractional exits depend on SignalFlow staying online and receiving market data. This is less safe than native Alpaca broker-side brackets. The app makes this visible through protection mode, monitor status, stale flags, and manual-attention alerts.
+
+Crypto-first pivot update:
+SignalFlow is now structured as a crypto-first, market-agnostic app. Coinbase Advanced Trade is the primary V1 crypto exchange. Alpaca stock functionality was preserved and wrapped as a secondary stock adapter.
+
+New architecture files:
+- backend/src/adapters/MarketAdapter.js
+- backend/src/adapters/alpacaStockAdapter.js
+- backend/src/adapters/coinbaseCryptoAdapter.js
+- backend/src/adapters/index.js
+- backend/src/cryptoScanner.js
+- backend/src/cryptoRisk.js
+
+Adapter interface:
+- name
+- marketType
+- getAccount
+- getBalances
+- getTradableAssets
+- getProducts
+- getTicker
+- getCandles
+- getOrderBook
+- getOpenPositions
+- getOpenOrders
+- submitOrder
+- cancelOrder
+- closePosition
+- subscribeMarketData
+- subscribeOrderUpdates
+- normalizeSymbol
+- formatSymbol
+
+Crypto defaults:
+- PRIMARY_MARKET=crypto
+- ACTIVE_EXCHANGE=coinbase
+- ENABLE_STOCKS_MODULE=true
+- ENABLE_CRYPTO_MODULE=true
+- ENABLE_FOREX_MODULE=false
+
+Coinbase env:
+- COINBASE_API_KEY_NAME
+- COINBASE_API_PRIVATE_KEY
+- COINBASE_API_BASE_URL=https://api.coinbase.com/api/v3/brokerage
+- COINBASE_PUBLIC_BASE_URL=https://api.exchange.coinbase.com
+- COINBASE_WS_URL
+- CRYPTO_TRADING_ENABLED=true
+- CRYPTO_AUTO_EXECUTION=false
+
+Crypto universe:
+- BTC-USD, ETH-USD, SOL-USD, LINK-USD, AVAX-USD, ADA-USD, DOGE-USD, XRP-USD, LTC-USD, BCH-USD
+
+New backend APIs:
+- GET /api/crypto/dashboard
+- GET /api/crypto/scanner/settings
+- POST /api/crypto/scanner/settings
+- POST /api/crypto/scanner/run?preset=crypto_micro_account
+
+Crypto scanner:
+- Uses Coinbase public market data for ticker/candles when credentials are missing.
+- Calculates EMA 9, EMA 20, VWAP, RSI 14, 15m and 1h percent change, 24h volume estimate, relative volume, spread, volatility-ish range, and scores.
+- Presets: crypto_conservative, crypto_micro_account, crypto_momentum_hunt.
+- Signals are tagged market_type=crypto, exchange=coinbase, adapter_name=coinbase, product_id=BTC-USD style.
+
+Crypto execution:
+- Spot-only.
+- No futures, leverage, margin, shorting, martingale, or averaging down.
+- Manual approval remains required unless both AUTO_EXECUTION=true and CRYPTO_AUTO_EXECUTION=true are explicitly set in env.
+- Approved crypto BUY uses Coinbase market order quote_size when credentials exist.
+- Protection mode is SignalFlow Monitor by default.
+
+SignalFlow Monitor crypto behavior:
+- Monitored positions now include market_type, exchange, adapter_name, base_asset, quote_asset, product_id.
+- Crypto monitor fetches Coinbase ticker price.
+- Crypto stop/target exits submit Coinbase spot sell orders.
+- Limitation: monitor protection depends on backend uptime and data freshness; it is not native exchange-side bracket protection.
+
+Frontend pivot:
+- Default nav: Dashboard, Crypto Scanner, Signals, Positions, Journal, Settings, Stocks Module.
+- Dashboard is crypto-first and shows Coinbase credential status, 24/7 spot market, USD balance, crypto regime, active preset, and monitor state.
+- Stocks Module keeps the older Alpaca dashboard/scanner/trades UI accessible.
+
+Verification performed for pivot:
+- Backend syntax checks passed.
+- Frontend build passed.
+- /api/account works in PRIMARY_MARKET=crypto mode.
+- /api/crypto/dashboard works with missing Coinbase credentials and public market data.
+- /api/crypto/scanner/settings works.
+- /api/positions and /api/orders work in crypto mode.
+- /api/crypto/scanner/run?preset=crypto_micro_account returned 200 with passed/rejected/closest/regime payload.
+
+Current limitations and next steps:
+- Coinbase authenticated order placement has not been live-tested because credentials are not configured.
+- Coinbase websocket subscriptions are placeholders.
+- Crypto scanner currently uses Coinbase Exchange public data for candles/ticker fallback; authenticated Advanced Trade endpoints are used for private account/order calls.
+- Journal/performance supports market metadata, but deeper crypto-specific realized P/L reconciliation from Coinbase fills should be added after live fill payloads are available.
+- Kraken adapter is not implemented yet; adapter interface is ready for it.

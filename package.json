@@ -1,0 +1,16 @@
+{
+  "name": "signalflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-money capable micro day-trading dashboard with safe manual approval defaults.",
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev": "concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\" \"python -m uvicorn main:app --app-dir quant-service --reload --host 0.0.0.0 --port 8000\"",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev:quant": "python -m uvicorn main:app --app-dir quant-service --reload --host 0.0.0.0 --port 8000"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -1,0 +1,20 @@
+export const marketAdapterContract = {
+  name: '',
+  marketType: '',
+  getAccount: async () => ({}),
+  getBalances: async () => [],
+  getTradableAssets: async () => [],
+  getProducts: async () => [],
+  getTicker: async (_symbol) => ({}),
+  getCandles: async (_symbol, _timeframe) => [],
+  getOrderBook: async (_symbol) => ({}),
+  getOpenPositions: async () => [],
+  getOpenOrders: async () => [],
+  submitOrder: async (_orderRequest) => ({}),
+  cancelOrder: async (_orderId) => ({}),
+  closePosition: async (_symbol) => ({}),
+  subscribeMarketData: (_symbols) => null,
+  subscribeOrderUpdates: () => null,
+  normalizeSymbol: (symbol) => symbol,
+  formatSymbol: (symbol) => symbol
+};
