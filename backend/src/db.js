@@ -119,7 +119,20 @@ const defaultSettings = {
   rsi_max: '75',
   max_signal_spread_percent: '0.35',
   min_signal_score: '60',
-  signal_mode: 'strict'
+  signal_mode: 'strict',
+  enable_legacy_crypto_strategy: String(config.enableLegacyCryptoStrategy),
+  block_longs_in_bearish_regime: String(config.blockLongsInBearishRegime),
+  allow_neutral_longs: String(config.allowNeutralLongs),
+  min_v2_signal_quality: String(config.minV2SignalQuality),
+  min_v2_risk_reward: String(config.minV2RiskReward),
+  max_distance_from_vwap_percent: String(config.maxDistanceFromVwapPercent),
+  max_distance_from_ema20_percent: String(config.maxDistanceFromEma20Percent),
+  min_pullback_depth_percent: String(config.minPullbackDepthPercent),
+  max_pullback_depth_percent: String(config.maxPullbackDepthPercent),
+  min_reclaim_strength_percent: String(config.minReclaimStrengthPercent),
+  min_v2_relative_volume: String(config.cryptoScanner.minRelativeVolume),
+  min_15m_momentum: String(config.min15mMomentum),
+  min_1h_momentum: String(config.min1hMomentum)
 };
 
 async function createIndexes() {

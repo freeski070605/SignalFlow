@@ -69,5 +69,9 @@ export const api = {
   performanceDaily: () => request('/api/performance/daily'),
   performanceStrategy: () => request('/api/performance/strategy'),
   performanceSymbols: () => request('/api/performance/symbols'),
-  signalOutcomes: () => request('/api/signals/outcomes')
+  signalOutcomes: () => request('/api/signals/outcomes'),
+  strategyLabSummary: () => request('/api/strategy-lab/summary'),
+  strategyLabConfidenceCalibration: () => request('/api/strategy-lab/confidence-calibration'),
+  strategyLabRegimePerformance: () => request('/api/strategy-lab/regime-performance'),
+  simulateStrategyV2: () => request('/api/strategy-lab/simulate-v2', { method: 'POST', body: '{}' })
 };

@@ -30,6 +30,7 @@ import {
   scanWatchlist
 } from './watchlist.js';
 import { attachWebSocket, broadcast } from './ws.js';
+import { strategyLabSummary, confidenceCalibrationReport, regimePerformance, simulateV2AgainstHistory } from './strategyLab.js';
 
 await migrate();
 
@@ -314,7 +315,13 @@ app.get('/api/crypto/dashboard', asyncHandler(async (_req, res) => {
     quoteCurrency: 'USD',
     trading24x7: true,
     monitor: await monitorStatus(),
-    autoCryptoScanner: autoCryptoScannerStatus()
+    autoCryptoScanner: autoCryptoScannerStatus(),
+    strategyStatus: {
+      currentStrategy: 'V2 Pullback Continuation',
+      legacyStrategy: getSetting('enable_legacy_crypto_strategy', 'false') === 'true' ? 'Enabled' : 'Disabled',
+      legacyDisabledReason: 'Disabled because historical outcomes showed 22/22 would-have-lost signals.',
+      bearishLongBlock: getSetting('block_longs_in_bearish_regime', 'true') === 'true' ? 'Active' : 'Inactive'
+    }
   });
 }));
 
@@ -908,6 +915,23 @@ app.get('/api/performance/symbols', asyncHandler(async (_req, res) => {
 
 app.get('/api/signals/outcomes', asyncHandler(async (_req, res) => {
   res.json(await signalOutcomes());
+}));
+
+
+app.get('/api/strategy-lab/summary', asyncHandler(async (_req, res) => {
+  res.json(await strategyLabSummary());
+}));
+
+app.get('/api/strategy-lab/confidence-calibration', asyncHandler(async (_req, res) => {
+  res.json(await confidenceCalibrationReport());
+}));
+
+app.get('/api/strategy-lab/regime-performance', asyncHandler(async (_req, res) => {
+  res.json(await regimePerformance());
+}));
+
+app.post('/api/strategy-lab/simulate-v2', asyncHandler(async (_req, res) => {
+  res.json(await simulateV2AgainstHistory());
 }));
 
 app.get('/api/events', asyncHandler(async (req, res) => {
