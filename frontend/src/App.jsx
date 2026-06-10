@@ -201,6 +201,15 @@ function CryptoDashboard({ data, monitor }) {
           <Metric label="Protection" value="SignalFlow Monitor" />
         </div>
       </Card>
+      <Card title="Strategy Status" icon={Shield}>
+        <div className="grid grid-cols-2 gap-3">
+          <Metric label="Current Strategy" value={data?.strategyStatus?.currentStrategy || 'V2 Pullback Continuation'} />
+          <Metric label="Legacy Strategy" value={data?.strategyStatus?.legacyStrategy || 'Disabled'} tone={(data?.strategyStatus?.legacyStrategy || 'Disabled') === 'Disabled' ? 'text-gain' : 'text-amber-300'} />
+          <Metric label="Bearish Long Block" value={data?.strategyStatus?.bearishLongBlock || 'Active'} tone="text-gain" />
+          <Metric label="Calibration" value="Outcome-aware" />
+        </div>
+        <p className="mt-3 text-xs text-slate-500">{data?.strategyStatus?.legacyDisabledReason || 'Disabled because historical outcomes showed 22/22 would-have-lost signals.'}</p>
+      </Card>
       <Card title="Monitor" icon={Activity}>
         <div className="grid grid-cols-2 gap-3">
           <Metric label="Open" value={monitor?.open || 0} />
@@ -469,6 +478,19 @@ function CryptoStrategySettingsPanel({ data, onSave }) {
         <Field label="RSI Max" value={form.rsiMax} onChange={(value) => set('rsiMax', value)} />
         <Field label="Max Signal Spread %" value={form.maxSignalSpreadPercent} onChange={(value) => set('maxSignalSpreadPercent', value)} />
         <Field label="Min Signal Score" value={form.minSignalScore} onChange={(value) => set('minSignalScore', value)} />
+        <Toggle label="Enable Legacy Crypto Strategy" value={form.enableLegacyCryptoStrategy === true || form.enableLegacyCryptoStrategy === 'true'} onChange={(value) => set('enableLegacyCryptoStrategy', value)} />
+        <Toggle label="Block Bearish Longs" value={form.blockLongsInBearishRegime !== false && form.blockLongsInBearishRegime !== 'false'} onChange={(value) => set('blockLongsInBearishRegime', value)} />
+        <Toggle label="Allow Neutral Longs" value={form.allowNeutralLongs === true || form.allowNeutralLongs === 'true'} onChange={(value) => set('allowNeutralLongs', value)} />
+        <Field label="Min V2 Quality" value={form.minV2SignalQuality} onChange={(value) => set('minV2SignalQuality', value)} />
+        <Field label="Min V2 R/R" value={form.minV2RiskReward} onChange={(value) => set('minV2RiskReward', value)} />
+        <Field label="Max VWAP Distance %" value={form.maxDistanceFromVwapPercent} onChange={(value) => set('maxDistanceFromVwapPercent', value)} />
+        <Field label="Max EMA20 Distance %" value={form.maxDistanceFromEma20Percent} onChange={(value) => set('maxDistanceFromEma20Percent', value)} />
+        <Field label="Min Pullback Depth %" value={form.minPullbackDepthPercent} onChange={(value) => set('minPullbackDepthPercent', value)} />
+        <Field label="Max Pullback Depth %" value={form.maxPullbackDepthPercent} onChange={(value) => set('maxPullbackDepthPercent', value)} />
+        <Field label="Min Reclaim Strength %" value={form.minReclaimStrengthPercent} onChange={(value) => set('minReclaimStrengthPercent', value)} />
+        <Field label="Min Relative Volume" value={form.minRelativeVolume} onChange={(value) => set('minRelativeVolume', value)} />
+        <Field label="Min 15m Momentum" value={form.min15mMomentum} onChange={(value) => set('min15mMomentum', value)} />
+        <Field label="Min 1h Momentum" value={form.min1hMomentum} onChange={(value) => set('min1hMomentum', value)} />
         <Toggle label="Require VWAP" value={form.requirePriceAboveVwap === true || form.requirePriceAboveVwap === 'true'} onChange={(value) => set('requirePriceAboveVwap', value)} />
         <Toggle label="Require EMA9 > EMA20" value={form.requireEma9AboveEma20 === true || form.requireEma9AboveEma20 === 'true'} onChange={(value) => set('requireEma9AboveEma20', value)} />
         <Toggle label="Require 15m Momentum" value={form.requirePositive15mMomentum === true || form.requirePositive15mMomentum === 'true'} onChange={(value) => set('requirePositive15mMomentum', value)} />
@@ -476,7 +498,7 @@ function CryptoStrategySettingsPanel({ data, onSave }) {
       </div>
       {(form.signalMode === 'discovery' || form.allowCounterRegimeTrades === true || form.allowCounterRegimeTrades === 'true') && (
         <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
-          Discovery or counter-regime signals are tagged DISCOVERY_RISK and still require manual review plus final risk approval.
+          Legacy V1 is diagnostic-only by default. Discovery or counter-regime signals are tagged DISCOVERY_RISK and still require manual review plus final risk approval.
         </div>
       )}
       <button onClick={() => onSave(form)} className="mt-3 rounded bg-gain px-4 py-2 text-sm font-bold text-ink">Save Strategy Settings</button>
@@ -596,7 +618,7 @@ function CryptoScanner({ scanner, settingsData, strategyData, analytics, runScan
             </div>
           </div>
         )}
-        <Table columns={['Passed', 'Price', '15m', '1h', 'Volume USD', 'Spread', 'Score', 'Signal Gate', 'Checklist', 'Inspect']} rows={passed} render={(row) => (
+        <Table columns={['Passed', 'Price', '15m', '1h', 'Volume USD', 'Spread', 'Legacy Gate', 'V2 Gate', 'V2 Decision', 'Confidence', 'Setup', 'Checklist', 'Inspect']} rows={passed} render={(row) => (
           <tr key={`crypto-pass-${row.symbol}`}>
             <td className="px-3 py-2 font-bold">{row.symbol}</td>
             <td className="px-3 py-2">{money(row.price)}</td>
@@ -604,13 +626,11 @@ function CryptoScanner({ scanner, settingsData, strategyData, analytics, runScan
             <td className="px-3 py-2">{pct(row.percent_change_1h)}</td>
             <td className="px-3 py-2">{money(row.volume)}</td>
             <td className="px-3 py-2">{pct(row.spread_percent)}</td>
-            <td className="px-3 py-2 font-bold">{Number(row.score || 0).toFixed(1)}</td>
-            <td className="px-3 py-2">
-              <div className="flex flex-col gap-1">
-                <Badge tone={signalGateTone(row.signal_generation_status)}>{signalGateLabel(row.signal_generation_status)}</Badge>
-                <span className="text-xs text-slate-500">{row.signal_generation_reason || '-'}</span>
-              </div>
-            </td>
+            <td className="px-3 py-2"><Badge tone="warn">{row.legacy_strategy_label || 'legacy diagnostic only'}</Badge></td>
+            <td className="px-3 py-2"><Badge tone={row.v2_gate?.decision === 'allowed' ? 'good' : 'bad'}>{row.v2_gate?.decision === 'allowed' ? 'V2 PASSED' : `BLOCKED: ${(row.v2_gate?.failedGates?.[0]?.key || 'conditions').replaceAll('_', ' ').toUpperCase()}`}</Badge></td>
+            <td className="px-3 py-2"><div className="max-w-xs text-xs text-slate-400">{row.v2_gate?.block_reason || row.signal_generation_reason || '-'}</div></td>
+            <td className="px-3 py-2"><div>{Number(row.v2_gate?.calibrated_signal_quality_score || row.calibrated_signal_quality_score || 0).toFixed(2)}</div><div className="text-xs text-amber-300">{row.v2_gate?.confidence_cap_reason || row.confidence_cap_reason || ''}</div></td>
+            <td className="px-3 py-2">{row.v2_gate?.setup_type || '-'}</td>
             <td className="px-3 py-2"><GateChecklist checklist={row.signal_gate?.checklist} /></td>
             <td className="px-3 py-2"><button onClick={() => openDebug(row)} className="rounded border border-line px-3 py-2 text-xs font-bold text-slate-200 hover:bg-panel2">Inspect Gate</button></td>
           </tr>
@@ -629,10 +649,12 @@ function CryptoScanner({ scanner, settingsData, strategyData, analytics, runScan
             <td className="px-3 py-2 font-bold">{row.count}</td>
           </tr>
         )} />
-        <Table columns={['Rejected', 'Reason']} rows={rejected} render={(row) => (
+        <Table columns={['Rejected', 'Reason', 'V2 Decision', 'Confidence']} rows={rejected} render={(row) => (
           <tr key={`crypto-rej-${row.symbol}`}>
             <td className="px-3 py-2 font-bold">{row.symbol}</td>
             <td className="px-3 py-2 text-slate-400">{row.reason}</td>
+            <td className="px-3 py-2"><Badge tone="bad">{row.v2_gate?.block_reason || row.signal_generation_reason || 'blocked'}</Badge></td>
+            <td className="px-3 py-2">{Number(row.v2_gate?.calibrated_signal_quality_score || 0).toFixed(2)}</td>
           </tr>
         )} />
       </div>
@@ -916,7 +938,7 @@ function Watchlist({ rows, universe, scanner, scannerSettingsData, blocked, refr
               <div className="space-y-1 text-sm text-slate-400">{suggested.map((item) => <div key={item}>{item}</div>)}</div>
             </div>
           )}
-          <Table columns={['Rejected', 'Reason']} rows={rejected} render={(row) => (
+          <Table columns={['Rejected', 'Reason', 'V2 Decision', 'Confidence']} rows={rejected} render={(row) => (
             <tr key={row.id || `rej-${row.symbol}`}>
               <td className="px-3 py-2 font-bold">{row.symbol}</td>
               <td className="px-3 py-2 text-slate-400">{row.reason}</td>
@@ -1164,7 +1186,7 @@ function Signals({ signals, refresh, scan, accountData }) {
           </button>
         </div>
       </div>
-      <Table columns={['Ticker', 'Side', 'Entry', 'Stop', 'Target', 'Risk', 'R/R', 'Confidence', 'Countdown', 'Stale', 'Regime', 'Protection', 'Status', 'Reason', 'Action']} rows={pendingSignals} render={(row) => {
+      <Table columns={['Ticker', 'Side', 'Strategy', 'Setup', 'Entry', 'Stop', 'Target', 'Risk', 'R/R', 'Calibrated Confidence', 'Cap Reason', 'Regime', 'V2 Details', 'Countdown', 'Stale', 'Protection', 'Status', 'Reason', 'Action']} rows={pendingSignals} render={(row) => {
         const remaining = row.status === 'pending' ? Math.max(0, Math.ceil((new Date(row.expires_at || 0).getTime() - now) / 1000)) : 0;
         const expired = row.status === 'expired' || Boolean(row.expired_at) || (row.status === 'pending' && remaining <= 0);
         const needsReview = row.status === 'pending' && !row.last_reviewed_at;
@@ -1217,6 +1239,8 @@ function Signals({ signals, refresh, scan, accountData }) {
             <tr key={`history-${row.id}`}>
               <td className="px-3 py-2 font-bold">{row.symbol}</td>
               <td className="px-3 py-2"><Badge tone={row.direction === 'BUY' ? 'good' : 'bad'}>{row.direction}</Badge></td>
+              <td className="px-3 py-2 text-xs">{row.strategy_name || row.strategy || '-'}</td>
+              <td className="px-3 py-2">{row.setup_type || '-'}</td>
               <td className="px-3 py-2">{money(row.entry_price)}</td>
               <td className="px-3 py-2 text-gain">{money(row.take_profit)}</td>
               <td className="px-3 py-2">{Number(row.confidence_score || row.confidence || 0).toFixed(2)}</td>
@@ -1283,8 +1307,28 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
   const rows = journal?.rows || [];
   const tags = journal?.mistakeTags || [];
   const outcomeRows = Array.isArray(outcomes) ? outcomes : outcomes?.rows || [];
+  const [filters, setFilters] = useState({ strategy_name: '', setup_type: '', regime: '', symbol: '', confidence_bucket: '' });
+  const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+  const confidenceBucket = (value) => {
+    const n = Number(value || 0);
+    if (n >= 0.9) return '0.90-1.00';
+    if (n >= 0.8) return '0.80-0.89';
+    if (n >= 0.7) return '0.70-0.79';
+    if (n >= 0.6) return '0.60-0.69';
+    if (n >= 0.5) return '0.50-0.59';
+    return '';
+  };
+  const matchesFilters = (row) => (
+    (!filters.strategy_name || String(row.strategy_name || row.strategy || '').toLowerCase().includes(filters.strategy_name.toLowerCase()))
+    && (!filters.setup_type || String(row.setup_type || '').toLowerCase().includes(filters.setup_type.toLowerCase()))
+    && (!filters.regime || String(row.market_regime || row.regime || '').toLowerCase().includes(filters.regime.toLowerCase()))
+    && (!filters.symbol || String(row.symbol || '').toLowerCase().includes(filters.symbol.toLowerCase()))
+    && (!filters.confidence_bucket || confidenceBucket(row.confidence || row.calibrated_signal_quality_score) === filters.confidence_bucket)
+  );
+  const filteredRows = rows.filter(matchesFilters);
+  const filteredOutcomeRows = outcomeRows.filter(matchesFilters);
   const fallbackOutcomeStats = useMemo(() => {
-    const expired = outcomeRows.filter((row) => row.status === 'expired');
+    const expired = filteredOutcomeRows.filter((row) => row.status === 'expired');
     const wouldHaveWon = expired.filter((row) => row.target_hit_first).length;
     const wouldHaveLost = expired.filter((row) => row.stop_hit_first).length;
     const resolved = wouldHaveWon + wouldHaveLost;
@@ -1294,7 +1338,7 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
       wouldHaveLost,
       winRateIfApproved: resolved ? (wouldHaveWon / resolved) * 100 : 0
     };
-  }, [outcomeRows]);
+  }, [filteredOutcomeRows]);
   const outcomeStats = Array.isArray(outcomes) ? fallbackOutcomeStats : outcomes?.stats || fallbackOutcomeStats;
   const [drafts, setDrafts] = useState({});
   const setDraft = (id, patch) => setDrafts((current) => ({ ...current, [id]: { ...(current[id] || {}), ...patch } }));
@@ -1307,6 +1351,20 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
 
   return (
     <div className="grid gap-4">
+      <Card title="Journal / Outcome Filters" icon={Settings}>
+        <div className="grid gap-3 md:grid-cols-5">
+          <Field label="strategy_name" value={filters.strategy_name} onChange={(value) => setFilter('strategy_name', value)} />
+          <Field label="setup_type" value={filters.setup_type} onChange={(value) => setFilter('setup_type', value)} />
+          <Field label="regime" value={filters.regime} onChange={(value) => setFilter('regime', value)} />
+          <Field label="symbol" value={filters.symbol} onChange={(value) => setFilter('symbol', value)} />
+          <label className="block text-sm text-slate-400">confidence bucket
+            <select className="mt-1 w-full rounded border border-line bg-ink px-3 py-2 text-white" value={filters.confidence_bucket} onChange={(event) => setFilter('confidence_bucket', event.target.value)}>
+              <option value="">All</option>
+              {['0.50-0.59', '0.60-0.69', '0.70-0.79', '0.80-0.89', '0.90-1.00'].map((bucket) => <option key={bucket} value={bucket}>{bucket}</option>)}
+            </select>
+          </label>
+        </div>
+      </Card>
       <Card title="Performance Summary" icon={Gauge}>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="Total Trades" value={summary?.totalTrades || 0} />
@@ -1326,7 +1384,7 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
         <Card title="Equity Curve" icon={Gauge}><MiniBars rows={summary?.equityCurve || []} valueKey="equity" labelKey="date" /></Card>
       </div>
       <Card title="Trade Journal" icon={ListChecks}>
-        <Table columns={['Symbol', 'Strategy', 'Entry/Exit', 'P/L', 'R/R', 'Duration', 'Regime', 'Exit', 'Notes']} rows={rows} render={(row) => {
+        <Table columns={['Symbol', 'Strategy', 'Entry/Exit', 'P/L', 'R/R', 'Duration', 'Regime', 'Exit', 'Notes']} rows={filteredRows} render={(row) => {
           const draft = drafts[row.id] || {};
           const selectedTags = draft.mistake_tags !== undefined ? draft.mistake_tags : parseTags(row.mistake_tags);
           return (
@@ -1362,7 +1420,7 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
           <Metric label="Would Have Lost" value={outcomeStats.wouldHaveLost || 0} tone="text-loss" />
           <Metric label="Win Rate If Approved" value={`${Number(outcomeStats.winRateIfApproved || 0).toFixed(1)}%`} />
         </div>
-        <Table columns={['Symbol', 'Direction', 'Confidence', 'Status', 'Entry', 'Stop', 'Target', 'Outcome', 'MFE', 'MAE', 'Target Hit', 'Stop Hit', 'Outcome Grade', 'Regime', 'Generated']} rows={outcomeRows} render={(row) => (
+        <Table columns={['Symbol', 'Direction', 'Confidence', 'Status', 'Entry', 'Stop', 'Target', 'Outcome', 'MFE', 'MAE', 'Target Hit', 'Stop Hit', 'Outcome Grade', 'Regime', 'Generated']} rows={filteredOutcomeRows} render={(row) => (
           <tr key={row.signal_id}>
             <td className="px-3 py-2 font-bold">{row.symbol}</td>
             <td className="px-3 py-2"><Badge tone={row.direction === 'BUY' ? 'good' : 'bad'}>{row.direction}</Badge></td>
@@ -1379,6 +1437,86 @@ function Journal({ journal, summary, daily, strategy, symbols, outcomes, refresh
             <td className="px-3 py-2"><Badge tone={['A', 'B'].includes(row.outcome_grade) ? 'good' : ['D', 'F'].includes(row.outcome_grade) ? 'bad' : 'neutral'}>{row.outcome_grade || '-'}</Badge></td>
             <td className="px-3 py-2">{row.market_regime}</td>
             <td className="px-3 py-2 text-slate-400">{row.generated_at}</td>
+          </tr>
+        )} />
+      </Card>
+    </div>
+  );
+}
+
+
+function StrategyLab({ data, onRefresh, onSimulate }) {
+  const legacy = data?.legacyReport || {};
+  const simulation = data?.v2Simulation || {};
+  const calibration = data?.confidenceCalibration || {};
+  const simRows = simulation.rows || [];
+  const buckets = calibration.buckets || [];
+  return (
+    <div className="grid gap-4">
+      <Card title="Strategy Lab" icon={Gauge}>
+        <div className="mb-4 flex flex-wrap gap-2">
+          <button onClick={onRefresh} className="rounded bg-gain px-3 py-2 text-sm font-bold text-ink">Refresh Lab</button>
+          <button onClick={onSimulate} className="rounded border border-line px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-panel2">Run V2 Simulation</button>
+          <Badge tone="warn">Legacy Strategy: Disabled</Badge>
+          <Badge tone="good">Bearish Long Block: Active</Badge>
+        </div>
+        <p className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">Disabled because historical outcomes showed 22/22 would-have-lost signals. Strategy V2 is designed to say “No trade. Conditions are not proven.” when evidence is incomplete.</p>
+      </Card>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="Legacy Strategy Report" icon={AlertTriangle}>
+          <div className="grid grid-cols-2 gap-3">
+            <Metric label="Total Legacy Signals" value={legacy.totalLegacySignals ?? legacy.signalCount ?? 0} />
+            <Metric label="Would Have Won" value={legacy.wouldHaveWonCount || 0} tone="text-gain" />
+            <Metric label="Would Have Lost" value={legacy.wouldHaveLostCount || 0} tone="text-loss" />
+            <Metric label="Win Rate" value={`${Number((legacy.winRate || 0) * 100).toFixed(1)}%`} />
+            <Metric label="Average MFE" value={pct(legacy.averageMfe)} tone="text-gain" />
+            <Metric label="Average MAE" value={pct(legacy.averageMae)} tone="text-loss" />
+          </div>
+          {legacy.unprofitableWarning && <div className="mt-3 rounded border border-loss bg-loss/10 p-3 text-sm text-rose-200">{legacy.unprofitableWarning}</div>}
+        </Card>
+        <Card title="V2 Simulation Report" icon={Shield}>
+          <div className="grid grid-cols-2 gap-3">
+            <Metric label="Old Strategy Signals" value={simulation.summary?.oldStrategySignals || 0} />
+            <Metric label="Old Would-Have-Lost" value={simulation.summary?.oldStrategyWouldHaveLost || 0} tone="text-loss" />
+            <Metric label="V2 Would Block" value={simulation.summary?.v2WouldHaveBlocked || 0} tone="text-gain" />
+            <Metric label="V2 Would Allow" value={simulation.summary?.v2WouldHaveAllowed || 0} tone="text-amber-300" />
+            <Metric label="Safety Improvement" value={`${Number(simulation.summary?.v2SafetyImprovementPercent || 0).toFixed(1)}%`} />
+            <Metric label="Insufficient Data" value={simulation.summary?.insufficientData || 0} />
+          </div>
+        </Card>
+      </div>
+      {calibration.warning && <div className="rounded border border-loss bg-loss/10 p-3 text-sm text-rose-200">{calibration.warning}</div>}
+      <Card title="Confidence Calibration" icon={Activity}>
+        <Table columns={['Bucket', 'Signals', 'Win Rate', 'Avg MFE', 'Avg MAE', 'Target Hit', 'Stop Hit']} rows={buckets} render={(row) => (
+          <tr key={row.bucket}>
+            <td className="px-3 py-2 font-bold">{row.bucket}</td>
+            <td className="px-3 py-2">{row.signalCount}</td>
+            <td className="px-3 py-2">{`${Number((row.winRate || 0) * 100).toFixed(1)}%`}</td>
+            <td className="px-3 py-2 text-gain">{pct(row.averageMfe)}</td>
+            <td className="px-3 py-2 text-loss">{pct(row.averageMae)}</td>
+            <td className="px-3 py-2">{`${Number((row.targetHitRate || 0) * 100).toFixed(1)}%`}</td>
+            <td className="px-3 py-2">{`${Number((row.stopHitRate || 0) * 100).toFixed(1)}%`}</td>
+          </tr>
+        )} />
+      </Card>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="Top Losing Conditions" icon={AlertTriangle}>
+          <Table columns={['Condition', 'Count']} rows={data?.topLosingConditions || []} render={(row) => <tr key={row.condition}><td className="px-3 py-2">{row.condition}</td><td className="px-3 py-2 font-bold">{row.count}</td></tr>} />
+        </Card>
+        <Card title="Blocked Condition Counts" icon={Shield}>
+          <Table columns={['Block Reason', 'Count']} rows={simulation.blockedConditionCounts || []} render={(row) => <tr key={row.reason}><td className="px-3 py-2">{row.reason}</td><td className="px-3 py-2 font-bold">{row.count}</td></tr>} />
+        </Card>
+      </div>
+      <Card title="Historical Signal V2 Replay" icon={ListChecks}>
+        <Table columns={['Symbol', 'Old Confidence', 'Old Outcome', 'Regime', 'V2 Decision', 'V2 Block Reason', 'V2 Quality']} rows={simRows} render={(row) => (
+          <tr key={`${row.signal_id}-${row.symbol}`}>
+            <td className="px-3 py-2 font-bold">{row.symbol}</td>
+            <td className="px-3 py-2">{Number(row.old_confidence || 0).toFixed(2)}</td>
+            <td className="px-3 py-2"><Badge tone={String(row.old_outcome).includes('lost') ? 'bad' : String(row.old_outcome).includes('won') ? 'good' : 'neutral'}>{String(row.old_outcome || 'unknown').replaceAll('_', ' ')}</Badge></td>
+            <td className="px-3 py-2">{row.regime}</td>
+            <td className="px-3 py-2"><Badge tone={row.v2_decision === 'allowed' ? 'good' : 'bad'}>{row.v2_decision}</Badge></td>
+            <td className="px-3 py-2 text-slate-400">{row.v2_block_reason || '-'}</td>
+            <td className="px-3 py-2">{Number(row.v2_quality_score || 0).toFixed(2)}</td>
           </tr>
         )} />
       </Card>
@@ -1632,6 +1770,7 @@ function App() {
   const [performanceStrategy, setPerformanceStrategy] = useState([]);
   const [performanceSymbols, setPerformanceSymbols] = useState([]);
   const [signalOutcomes, setSignalOutcomes] = useState([]);
+  const [strategyLab, setStrategyLab] = useState(null);
   const [events, setEvents] = useState([]);
   const [clock, setClock] = useState(null);
   const [monitor, setMonitor] = useState(null);
@@ -1642,7 +1781,7 @@ function App() {
   const [closeStatuses, setCloseStatuses] = useState({});
   const [toast, setToast] = useState(null);
 
-  const tabs = useMemo(() => ['Dashboard', 'Crypto Scanner', 'Signals', 'Positions', 'Journal', 'Settings', 'Stocks Module'], []);
+  const tabs = useMemo(() => ['Dashboard', 'Crypto Scanner', 'Strategy Lab', 'Signals', 'Positions', 'Journal', 'Settings', 'Stocks Module'], []);
   const refreshJournal = async () => {
     const [journalRows, summary, dailyRows, strategyRows, symbolRows, outcomes] = await Promise.all([
       api.journal(),
@@ -1692,6 +1831,7 @@ function App() {
       setCryptoStrategySettings(await api.cryptoStrategySettings());
       setNearMissAnalyticsData(await api.nearMissAnalytics().catch(() => null));
       await refreshJournal();
+      setStrategyLab(await api.strategyLabSummary().catch(() => null));
     } catch (err) {
       setError(err.message);
     }
@@ -1775,6 +1915,15 @@ function App() {
   };
   const debugCryptoSignal = (runId, symbol) => api.debugCryptoSignal({ runId, symbol });
   const simulateCryptoSignalModes = (runId) => api.simulateCryptoSignalModes({ runId });
+  const refreshStrategyLab = async () => {
+    setStrategyLab(await api.strategyLabSummary());
+  };
+
+  const simulateStrategyV2 = async () => {
+    const simulation = await api.simulateStrategyV2();
+    setStrategyLab((current) => ({ ...(current || {}), v2Simulation: simulation }));
+  };
+
   const relaxScannerSettings = async () => {
     try {
       setError('');
@@ -1893,6 +2042,7 @@ function App() {
         {error && <div className="mb-4 rounded border border-loss bg-loss/10 p-3 text-sm text-rose-200">{error}</div>}
         {tab === 'Dashboard' && <CryptoDashboard data={cryptoDashboard} monitor={monitor} />}
         {tab === 'Crypto Scanner' && <CryptoScanner scanner={cryptoScanner} settingsData={cryptoScannerSettings} strategyData={cryptoStrategySettings} analytics={nearMissAnalyticsData} runScanner={runCryptoScanner} saveStrategySettings={saveCryptoStrategySettings} debugSignal={debugCryptoSignal} simulateModes={simulateCryptoSignalModes} />}
+        {tab === 'Strategy Lab' && <StrategyLab data={strategyLab} onRefresh={refreshStrategyLab} onSimulate={simulateStrategyV2} />}
         {tab === 'Signals' && <Signals signals={signals} refresh={refresh} scan={refreshWatchlist} accountData={accountData} />}
         {tab === 'Positions' && <CryptoPositions positions={positions.filter((row) => row.market_type === 'crypto' || String(row.symbol || '').includes('-USD'))} monitorRows={monitoredPositions} refresh={refresh} />}
         {tab === 'Journal' && <Journal journal={journal} summary={performanceSummary} daily={performanceDaily} strategy={performanceStrategy} symbols={performanceSymbols} outcomes={signalOutcomes} refreshJournal={refreshJournal} />}
