@@ -19,29 +19,10 @@ if (config.mongodbUri) {
   mongoConnectionError = new Error('MONGODB_URI is required. SignalFlow uses MongoDB-only persistence.');
 }
 
-function unavailableError(name, property) {
-  return new Error(`MongoDB unavailable; cannot access ${name}.${String(property)}.`);
-}
-
-function unavailableCursor(name, property) {
-  const cursor = {
-    sort: () => cursor,
-    limit: () => cursor,
-    project: () => cursor,
-    skip: () => cursor,
-    toArray: async () => { throw unavailableError(name, property); },
-    next: async () => { throw unavailableError(name, property); },
-    forEach: async () => { throw unavailableError(name, property); }
-  };
-  return cursor;
-}
-
 const unavailableCollection = (name) => new Proxy({}, {
   get: (_target, property) => {
     if (property === 'collectionName') return name;
-    if (['find', 'aggregate'].includes(String(property))) return () => unavailableCursor(name, property);
-    if (String(property) === 'watch') return () => unavailableCursor(name, property);
-    return async () => { throw unavailableError(name, property); };
+    return () => Promise.reject(new Error(`MongoDB unavailable; cannot access ${name}.${String(property)}.`));
   }
 });
 
@@ -184,25 +165,7 @@ const defaultSettings = {
   min_reclaim_strength_percent: String(config.minReclaimStrengthPercent),
   min_v2_relative_volume: String(config.cryptoScanner.minRelativeVolume),
   min_15m_momentum: String(config.min15mMomentum),
-  min_1h_momentum: String(config.min1hMomentum),
-  default_market: 'crypto',
-  active_market: 'crypto',
-  global_kill_switch: 'false',
-  crypto_kill_switch: 'false',
-  stocks_kill_switch: 'false',
-  forex_kill_switch: 'true',
-  forex_module_enabled: String(config.enableForexModule),
-  forex_broker: config.forexBroker,
-  forex_trading_enabled: String(config.forexTradingEnabled),
-  forex_auto_execution: String(config.forexAutoExecution),
-  forex_env: config.forexEnv,
-  forex_risk_per_trade_percent: String(config.forexRiskPerTradePercent),
-  forex_max_daily_loss_percent: String(config.forexMaxDailyLossPercent),
-  forex_max_open_positions: String(config.forexMaxOpenPositions),
-  forex_max_spread_pips: String(config.forexMaxSpreadPips),
-  forex_min_risk_reward: String(config.forexMinRiskReward),
-  forex_allow_leverage: String(config.forexAllowLeverage),
-  forex_session_filter: String(config.forexSessionFilter)
+  min_1h_momentum: String(config.min1hMomentum)
 };
 
 async function createIndexes() {

@@ -123,6 +123,7 @@ export function saveCryptoStrategySettings(input = {}) {
     setSetting(dbKey, next[publicKey]);
   });
   const v2Keys = {
+    enableLegacyCryptoStrategy: 'enable_legacy_crypto_strategy',
     blockLongsInBearishRegime: 'block_longs_in_bearish_regime',
     allowNeutralLongs: 'allow_neutral_longs',
     minV2SignalQuality: 'min_v2_signal_quality',
@@ -838,6 +839,7 @@ export function evaluateCryptoSignalGate(row, regime, settings = cryptoStrategyS
   const hardFailures = failedGates.filter((gate) => !(signalMode === 'discovery' && discoveryWarningGates.has(gate.key)));
   if (!settings.enableLegacyCryptoStrategy) {
     hardFailures.push({ key: 'legacy_disabled', label: 'Deprecated Strategy Archive only: archived because historical outcomes showed 22/22 would-have-lost signals.', recommendedAdjustment: 'Deprecated Strategy Archive cannot be enabled for live signal creation. Use Strategy V2.' });
+    hardFailures.push({ key: 'legacy_disabled', label: 'Legacy diagnostic only: disabled because historical outcomes showed 22/22 would-have-lost signals.', recommendedAdjustment: 'Use Strategy V2 instead of enabling legacy signal creation.' });
   }
   const wouldCreateSignal = settings.enableLegacyCryptoStrategy && hardFailures.length === 0;
   let status = signalMode === 'discovery' ? 'discovery_risk' : 'created_signal';
@@ -959,6 +961,7 @@ async function persistCryptoCandidate(runId, row) {
     confidence_cap_reason: row.v2_gate?.confidence_cap_reason || null,
     v2_block_reason: row.v2_gate?.block_reason || null,
     legacy_gate: row.legacy_gate?.legacy_diagnostic_only ? 'deprecated pattern warning' : null,
+    legacy_gate: row.legacy_gate?.legacy_diagnostic_only ? 'legacy diagnostic only' : null,
     blockers_json: JSON.stringify(row.blockers || []),
     scanned_at: nowIso()
   });
@@ -977,6 +980,7 @@ export async function runCryptoScanner(options = {}) {
   const learningRows = await historicalOutcomeRows().catch(() => []);
   if (!effectiveStrategySettings.enableLegacyCryptoStrategy) {
     emitEvent('Scanner', 'legacy_strategy_disabled', 'Deprecated Strategy Archive: archived because historical outcomes showed 22/22 would-have-lost signals.', { enableLegacyCryptoStrategy: false }, 'warn');
+    emitEvent('Scanner', 'legacy_strategy_disabled', 'Legacy Strategy: Disabled because historical outcomes showed 22/22 would-have-lost signals.', { enableLegacyCryptoStrategy: false }, 'warn');
   }
   const rows = [];
   for (const symbol of universe) {
@@ -998,6 +1002,7 @@ export async function runCryptoScanner(options = {}) {
     row.v2_gate = signalGeneration.strategy_name === V2_STRATEGY_NAME ? signalGeneration : null;
     row.legacy_gate = signalGeneration.legacy_gate || null;
     row.legacy_strategy_label = effectiveStrategySettings.enableLegacyCryptoStrategy ? 'deprecated archive warning' : 'deprecated pattern warning';
+    row.legacy_strategy_label = effectiveStrategySettings.enableLegacyCryptoStrategy ? 'legacy enabled' : 'legacy diagnostic only';
   }
   const passed = rows.filter((row) => row.passed).sort((a, b) => b.score - a.score).slice(0, settings.maxResults);
   const rejected = rows.filter((row) => !row.passed);
