@@ -3,6 +3,8 @@ import { config } from './config.js';
 import { collections, getSetting, nowIso, setSetting, withoutMongoIds } from './db.js';
 import { emitEvent } from './events.js';
 import { coinbaseCryptoAdapter, cryptoMajors, cryptoUniverse } from './adapters/coinbaseCryptoAdapter.js';
+import { evaluateCryptoStrategyV2, cryptoStrategyV2Settings, V2_SETUP_TYPE, V2_STRATEGY_NAME } from './cryptoStrategyV2.js';
+import { historicalOutcomeRows } from './strategyLearning.js';
 
 const stable = new Set(['USDC-USD', 'USDT-USD', 'DAI-USD']);
 const maxQuoteAgeMs = 60_000;
@@ -86,7 +88,9 @@ function strategySettingsFromStorage() {
     rsiMin: num('rsi_min', preset.rsiMin),
     rsiMax: num('rsi_max', preset.rsiMax),
     maxSignalSpreadPercent: num('max_signal_spread_percent', preset.maxSignalSpreadPercent),
-    minSignalScore: Math.max(num('min_signal_score', preset.minSignalScore), preset.minSignalScore)
+    minSignalScore: Math.max(num('min_signal_score', preset.minSignalScore), preset.minSignalScore),
+    ...cryptoStrategyV2Settings(),
+    min24hVolumeUsd: num('min_24h_volume_usd', config.cryptoScanner.min24hVolumeUsd)
   };
 }
 
@@ -117,6 +121,23 @@ export function saveCryptoStrategySettings(input = {}) {
   Object.entries(signalSettingKeys).forEach(([publicKey, dbKey]) => {
     if (publicKey === 'signalMode') return;
     setSetting(dbKey, next[publicKey]);
+  });
+  const v2Keys = {
+    blockLongsInBearishRegime: 'block_longs_in_bearish_regime',
+    allowNeutralLongs: 'allow_neutral_longs',
+    minV2SignalQuality: 'min_v2_signal_quality',
+    minV2RiskReward: 'min_v2_risk_reward',
+    maxDistanceFromVwapPercent: 'max_distance_from_vwap_percent',
+    maxDistanceFromEma20Percent: 'max_distance_from_ema20_percent',
+    minPullbackDepthPercent: 'min_pullback_depth_percent',
+    maxPullbackDepthPercent: 'max_pullback_depth_percent',
+    minReclaimStrengthPercent: 'min_reclaim_strength_percent',
+    minRelativeVolume: 'min_v2_relative_volume',
+    min15mMomentum: 'min_15m_momentum',
+    min1hMomentum: 'min_1h_momentum'
+  };
+  Object.entries(v2Keys).forEach(([publicKey, dbKey]) => {
+    if (input[publicKey] !== undefined && input[publicKey] !== '') setSetting(dbKey, input[publicKey]);
   });
   return cryptoStrategySettings();
 }
@@ -242,7 +263,7 @@ async function cryptoSafetyContext() {
   const maxDailyLossDollars = equity > 0 ? equity * (num('crypto_max_daily_loss_percent', config.cryptoMaxDailyLossPercent) / 100) : 0;
   const pendingSignals = await collections.signals.find({ status: 'pending', market_type: 'crypto' }, { projection: { symbol: 1 } }).toArray();
   return {
-    killSwitchActive: getSetting('kill_switch', 'false') === 'true',
+    killSwitchActive: getSetting('global_kill_switch', getSetting('kill_switch', 'false')) === 'true' || getSetting('crypto_kill_switch', 'false') === 'true',
     openPositionSymbols: new Set(positions.map((row) => row.symbol)),
     pendingSignalSymbols: new Set(pendingSignals.map((row) => row.symbol)),
     maxDailyLossHit: maxDailyLossDollars > 0 && realizedPnl <= -maxDailyLossDollars
@@ -677,6 +698,8 @@ async function scoreCryptoSymbol(symbol, settings, blocked, productMap = new Map
     percentChange15m: percentChange(closes, 3),
     percentChange1h: percentChange(closes, 12),
     relativeVolume: avgVolume ? latestVolume / avgVolume : 0,
+    avgVolume,
+    volume_avg: avgVolume,
     volatility: closes.length ? Math.max(...closes.slice(-20)) - Math.min(...closes.slice(-20)) : 0
   };
   const reasons = [];
@@ -719,6 +742,7 @@ async function scoreCryptoSymbol(symbol, settings, blocked, productMap = new Map
     percent_change_15m: indicators.percentChange15m,
     percent_change_1h: indicators.percentChange1h,
     indicators,
+    candles,
     candle_count: candles.length,
     product,
     tradable: isProductTradable(product),
@@ -812,7 +836,10 @@ export function evaluateCryptoSignalGate(row, regime, settings = cryptoStrategyS
 
   const discoveryWarningGates = new Set(['regime', 'vwap', 'ema', 'momentum']);
   const hardFailures = failedGates.filter((gate) => !(signalMode === 'discovery' && discoveryWarningGates.has(gate.key)));
-  const wouldCreateSignal = hardFailures.length === 0;
+  if (!settings.enableLegacyCryptoStrategy) {
+    hardFailures.push({ key: 'legacy_disabled', label: 'Deprecated Strategy Archive only: archived because historical outcomes showed 22/22 would-have-lost signals.', recommendedAdjustment: 'Deprecated Strategy Archive cannot be enabled for live signal creation. Use Strategy V2.' });
+  }
+  const wouldCreateSignal = settings.enableLegacyCryptoStrategy && hardFailures.length === 0;
   let status = signalMode === 'discovery' ? 'discovery_risk' : 'created_signal';
   if (!wouldCreateSignal) {
     if (failedGates.some((gate) => gate.key === 'duplicate')) status = 'duplicate_pending_signal';
@@ -820,6 +847,7 @@ export function evaluateCryptoSignalGate(row, regime, settings = cryptoStrategyS
     else if (failedGates.some((gate) => gate.key === 'product_tradable' || gate.key === 'blocked_symbol')) status = 'unsafe_product';
     else if (failedGates.some((gate) => gate.key === 'missing_quote_data' || gate.key === 'quote_fresh')) status = 'missing_quote_data';
     else if (failedGates.some((gate) => gate.key === 'missing_candle_data')) status = 'missing_candle_data';
+    else if (hardFailures.some((gate) => gate.key === 'legacy_disabled')) status = 'legacy_strategy_disabled';
     else if (failedGates.some((gate) => gate.key === 'regime')) status = 'blocked_by_regime';
     else if (failedGates.some((gate) => gate.key === 'scanner_passed')) status = 'rejected_filters';
     else status = 'no_buy_confirmation';
@@ -832,6 +860,7 @@ export function evaluateCryptoSignalGate(row, regime, settings = cryptoStrategyS
   const firstFailure = hardFailures[0] || failedGates[0];
 
   return {
+    legacy_diagnostic_only: !settings.enableLegacyCryptoStrategy,
     checklist,
     failedGates,
     activeSettings: settings,
@@ -843,31 +872,46 @@ export function evaluateCryptoSignalGate(row, regime, settings = cryptoStrategyS
   };
 }
 
-async function saveCryptoSignal(row, regime, strategySettings, safety) {
-  const gate = evaluateCryptoSignalGate(row, regime, strategySettings, safety);
-  if (!gate.wouldCreateSignal) return gate;
+async function saveCryptoSignal(row, regime, strategySettings, safety, learningRows = []) {
+  const legacyGate = evaluateCryptoSignalGate(row, regime, strategySettings, safety);
+  const v2Gate = evaluateCryptoStrategyV2(row, regime, safety, learningRows, strategySettings);
+  emitEvent('Scanner', 'v2_gate_evaluated', `${row.symbol} V2 gate evaluated: ${v2Gate.decision}.`, { symbol: row.symbol, decision: v2Gate.decision, reason: v2Gate.block_reason, score: v2Gate.calibrated_signal_quality_score });
+  if (v2Gate.confidence_cap_reason) {
+    emitEvent('Scanner', 'confidence_capped', `${row.symbol} confidence capped: ${v2Gate.confidence_cap_reason}`, { symbol: row.symbol, reason: v2Gate.confidence_cap_reason, cap: v2Gate.confidence_cap }, 'warn');
+  }
+  if (v2Gate.failedGates?.some((gate) => gate.key === 'bearish_regime')) {
+    emitEvent('Scanner', 'bearish_long_blocked', `${row.symbol} long blocked: bearish regime historically unprofitable.`, { symbol: row.symbol, regime: regime?.regime }, 'warn');
+  }
+  if (!v2Gate.wouldCreateSignal) {
+    emitEvent('Scanner', 'v2_candidate_blocked', `${row.symbol} V2 blocked: ${v2Gate.block_reason || 'conditions are not proven'}`, { symbol: row.symbol, reason: v2Gate.block_reason, failedGates: v2Gate.failedGates }, 'info');
+    return { ...v2Gate, legacy_gate: legacyGate, reason: v2Gate.block_reason || 'No trade. Conditions are not proven.' };
+  }
   const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const existing = await collections.signals.findOne({ symbol: row.symbol, status: 'pending', market_type: 'crypto', created_at: { $gte: cutoff } });
   if (existing) {
-    const duplicateGate = { key: 'duplicate', label: 'pending crypto signal already exists for this symbol', recommendedAdjustment: recommendationForGate('duplicate', strategySettings) };
-    return { ...gate, failedGates: [...(gate.failedGates || []), duplicateGate], wouldCreateSignal: false, status: 'duplicate_pending_signal', reason: duplicateGate.label, recommendedAdjustment: duplicateGate.recommendedAdjustment };
+    const duplicateGate = { key: 'duplicate', label: 'pending crypto signal already exists for this symbol' };
+    return { ...v2Gate, legacy_gate: legacyGate, failedGates: [...(v2Gate.failedGates || []), duplicateGate], wouldCreateSignal: false, status: 'duplicate_pending_signal', decision: 'blocked', block_reason: duplicateGate.label, reason: duplicateGate.label };
   }
-  const stop = row.price * (1 - config.cryptoStopLossPercent / 100);
-  const target = row.price * (1 + config.cryptoTakeProfitPercent / 100);
-  const isDiscovery = gate.status === 'discovery_risk';
-  const warningLabels = (gate.failedGates || []).map((failedGate) => failedGate.label).join('; ');
-  const reason = isDiscovery ? `DISCOVERY_RISK: ${warningLabels || gate.reason}` : 'Crypto EMA/VWAP/RSI momentum confirmation';
   await collections.signals.insertOne({
     id: nanoid(),
     symbol: row.symbol,
     direction: 'BUY',
     entry_price: row.price,
-    stop_loss: stop,
-    take_profit: target,
-    confidence: Math.min(0.99, row.score / 100),
-    reason,
+    stop_loss: v2Gate.metrics.stop_loss,
+    take_profit: v2Gate.metrics.take_profit,
+    confidence: v2Gate.calibrated_signal_quality_score,
+    calibrated_signal_quality_score: v2Gate.calibrated_signal_quality_score,
+    confidence_cap_reason: v2Gate.confidence_cap_reason,
+    reason: 'Strategy V2 pullback continuation: bullish regime, controlled pullback, reclaim, volume, and risk/reward gates passed.',
     status: 'pending',
-    strategy: 'CRYPTO_EMA_VWAP_RSI_MOMENTUM_V1',
+    strategy: V2_STRATEGY_NAME,
+    strategy_name: V2_STRATEGY_NAME,
+    setup_type: V2_SETUP_TYPE,
+    market_regime: regime?.regime || 'NEUTRAL',
+    v2_metrics_json: JSON.stringify(v2Gate.metrics),
+    v2_gate_json: JSON.stringify(v2Gate),
+    why_valid_json: JSON.stringify(v2Gate.why_valid || []),
+    why_could_fail_json: JSON.stringify(v2Gate.why_could_fail || []),
     expires_at: new Date(Date.now() + config.signalTtlSeconds * 1000).toISOString(),
     signal_price: row.price,
     stale_status: 'fresh',
@@ -879,10 +923,8 @@ async function saveCryptoSignal(row, regime, strategySettings, safety) {
     adapter_name: 'coinbase',
     created_at: nowIso()
   });
-  if (isDiscovery) {
-    await collections.signals.updateMany({ symbol: row.symbol, status: 'pending', market_type: 'crypto' }, { $set: { stale_status: 'DISCOVERY_RISK' } });
-  }
-  return { ...gate, reason: isDiscovery ? 'DISCOVERY_RISK pending signal created; manual review required' : 'pending crypto BUY signal created' };
+  emitEvent('Scanner', 'v2_signal_created', `${row.symbol} V2 pending BUY signal created; manual review required.`, { symbol: row.symbol, strategy_name: V2_STRATEGY_NAME, setup_type: V2_SETUP_TYPE, confidence: v2Gate.calibrated_signal_quality_score }, 'warn');
+  return { ...v2Gate, legacy_gate: legacyGate, status: 'created_signal', reason: 'V2 pending crypto BUY signal created; manual review required' };
 }
 
 async function persistCryptoCandidate(runId, row) {
@@ -910,6 +952,13 @@ async function persistCryptoCandidate(runId, row) {
     signal_status: row.signal_status || 'NONE',
     indicators_json: JSON.stringify(row.indicators || {}),
     signal_gate_json: JSON.stringify(row.signal_gate || null),
+    v2_gate_json: JSON.stringify(row.v2_gate || row.signal_gate || null),
+    strategy_name: row.v2_gate?.strategy_name || null,
+    setup_type: row.v2_gate?.setup_type || null,
+    calibrated_signal_quality_score: row.v2_gate?.calibrated_signal_quality_score ?? null,
+    confidence_cap_reason: row.v2_gate?.confidence_cap_reason || null,
+    v2_block_reason: row.v2_gate?.block_reason || null,
+    legacy_gate: row.legacy_gate?.legacy_diagnostic_only ? 'deprecated pattern warning' : null,
     blockers_json: JSON.stringify(row.blockers || []),
     scanned_at: nowIso()
   });
@@ -925,6 +974,10 @@ export async function runCryptoScanner(options = {}) {
   const safety = { ...await cryptoSafetyContext(), blockedSymbols: blocked };
   const universe = settings.activePreset === 'crypto_conservative' ? cryptoMajors : cryptoUniverse;
   const regime = await cryptoMarketRegime();
+  const learningRows = await historicalOutcomeRows().catch(() => []);
+  if (!effectiveStrategySettings.enableLegacyCryptoStrategy) {
+    emitEvent('Scanner', 'legacy_strategy_disabled', 'Deprecated Strategy Archive: archived because historical outcomes showed 22/22 would-have-lost signals.', { enableLegacyCryptoStrategy: false }, 'warn');
+  }
   const rows = [];
   for (const symbol of universe) {
     try {
@@ -936,12 +989,15 @@ export async function runCryptoScanner(options = {}) {
   for (const row of rows) {
     row.run_id = runId;
     const signalGeneration = row.passed
-      ? await saveCryptoSignal(row, regime, effectiveStrategySettings, safety)
-      : evaluateCryptoSignalGate(row, regime, effectiveStrategySettings, safety);
+      ? await saveCryptoSignal(row, regime, effectiveStrategySettings, safety, learningRows)
+      : { ...evaluateCryptoStrategyV2(row, regime, safety, learningRows, effectiveStrategySettings), legacy_gate: evaluateCryptoSignalGate(row, regime, effectiveStrategySettings, safety) };
     row.signal_status = ['created_signal', 'discovery_risk', 'duplicate_pending_signal'].includes(signalGeneration.status) ? 'BUY' : 'NONE';
     row.signal_generation_status = signalGeneration.status;
     row.signal_generation_reason = signalGeneration.reason;
     row.signal_gate = signalGeneration;
+    row.v2_gate = signalGeneration.strategy_name === V2_STRATEGY_NAME ? signalGeneration : null;
+    row.legacy_gate = signalGeneration.legacy_gate || null;
+    row.legacy_strategy_label = effectiveStrategySettings.enableLegacyCryptoStrategy ? 'deprecated archive warning' : 'deprecated pattern warning';
   }
   const passed = rows.filter((row) => row.passed).sort((a, b) => b.score - a.score).slice(0, settings.maxResults);
   const rejected = rows.filter((row) => !row.passed);

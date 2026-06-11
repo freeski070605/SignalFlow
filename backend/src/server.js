@@ -3,7 +3,7 @@ import cors from 'cors';
 import express from 'express';
 import { nanoid } from 'nanoid';
 import { config, executionMode } from './config.js';
-import { allSettings, collections, getSetting, logEvent, migrate, nowIso, setSetting, withoutMongoId, withoutMongoIds } from './db.js';
+import { allSettings, collections, databaseStatus, getSetting, logEvent, migrate, nowIso, setSetting, withoutMongoId, withoutMongoIds } from './db.js';
 import { cancelOrder, closePosition, getAccount, getAsset, getMarketClock, getOrders, getPositions, submitBracketNotionalOrder, submitMarketExitOrder, submitSimpleNotionalBuyOrder } from './alpaca.js';
 import { emitEvent, recentEvents } from './events.js';
 import { journalRows, mistakeTags, performanceDaily, performanceStrategy, performanceSummary, performanceSymbols, recordClosedTrade, signalOutcomes, startSignalOutcomeAnalysisJob, updateJournalNotes } from './journal.js';
@@ -30,6 +30,9 @@ import {
   scanWatchlist
 } from './watchlist.js';
 import { attachWebSocket, broadcast } from './ws.js';
+import { strategyLabSummary, confidenceCalibrationReport, regimePerformance, simulateV2AgainstHistory } from './strategyLab.js';
+import { globalDashboard, marketDashboard, marketScannerSettings, saveMarketScannerSettings, runMarketScanner, marketSignals, marketPositions, marketJournal, marketPerformance, marketStrategyLab, marketSettings, saveMarketSettings } from './marketWorkspace.js';
+import { normalizeMarket } from './adapters/adapterRegistry.js';
 
 await migrate();
 
@@ -233,6 +236,107 @@ async function waitForPositionClosed(symbol, isCrypto = false) {
   return false;
 }
 
+
+function routeMarket(req, res) {
+  const market = normalizeMarket(req.params.market);
+  if (!market) {
+    res.status(404).json({ error: 'Market workspace not available.' });
+    return null;
+  }
+  return market;
+}
+
+app.get('/api/global/dashboard', asyncHandler(async (_req, res) => {
+  res.json(await globalDashboard());
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/dashboard', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketDashboard(market));
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/account', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketDashboard(market));
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/balances', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  const dashboard = await marketDashboard(market);
+  res.json({ market_type: market, balances: dashboard.balances || [], dashboard });
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/scanner/settings', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketScannerSettings(market));
+}));
+
+app.post('/api/:market(crypto|stocks|forex)/scanner/settings', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await saveMarketScannerSettings(market, req.body || {}));
+}));
+
+app.post('/api/:market(crypto|stocks|forex)/scanner/run', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  const result = await runMarketScanner(market, req.query.preset);
+  broadcast('scanner_run', result);
+  res.json(result);
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/signals', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketSignals(market));
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/signals/:id/review', (req, res) => res.redirect(307, `/api/signals/${req.params.id}/review`));
+app.post('/api/:market(crypto|stocks|forex)/signals/:id/approve', (req, res) => res.redirect(307, `/api/signals/${req.params.id}/approve`));
+app.post('/api/:market(crypto|stocks|forex)/signals/:id/reject', (req, res) => res.redirect(307, `/api/signals/${req.params.id}/reject`));
+
+app.get('/api/:market(crypto|stocks|forex)/positions', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketPositions(market));
+}));
+
+app.post('/api/:market(crypto|stocks|forex)/positions/:symbol/close', (req, res) => res.redirect(307, `/api/positions/${req.params.symbol}/close`));
+
+app.get('/api/:market(crypto|stocks|forex)/journal', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketJournal(market));
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/performance/summary', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketPerformance(market));
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/strategy-lab/summary', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketStrategyLab(market));
+}));
+
+app.get('/api/:market(crypto|stocks|forex)/settings', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await marketSettings(market));
+}));
+
+app.post('/api/:market(crypto|stocks|forex)/settings', asyncHandler(async (req, res) => {
+  const market = routeMarket(req, res);
+  if (!market) return;
+  res.json(await saveMarketSettings(market, req.body || {}));
+}));
+
 app.get('/api/account', asyncHandler(async (_req, res) => {
   if (config.primaryMarket === 'crypto') {
     const [account, balances, positions, regime] = await Promise.all([
@@ -314,7 +418,13 @@ app.get('/api/crypto/dashboard', asyncHandler(async (_req, res) => {
     quoteCurrency: 'USD',
     trading24x7: true,
     monitor: await monitorStatus(),
-    autoCryptoScanner: autoCryptoScannerStatus()
+    autoCryptoScanner: autoCryptoScannerStatus(),
+    strategyStatus: {
+      currentStrategy: 'V2 Pullback Continuation',
+      deprecatedStrategyArchive: 'Archived',
+      deprecatedArchiveReason: 'Archived because historical outcomes showed 22/22 would-have-lost signals.',
+      bearishLongBlock: getSetting('block_longs_in_bearish_regime', 'true') === 'true' ? 'Active' : 'Inactive'
+    }
   });
 }));
 
@@ -850,6 +960,7 @@ app.post('/api/signals/:id/approve', asyncHandler(async (req, res) => {
 app.post('/api/trading/kill-switch', (req, res) => {
   const enabled = req.body?.enabled !== false;
   setSetting('kill_switch', String(enabled));
+  setSetting('global_kill_switch', String(enabled));
   logEvent('warn', enabled ? 'kill_switch_enabled' : 'kill_switch_disabled', {});
   emitEvent('Risk', enabled ? 'kill_switch_activated' : 'kill_switch_reset', enabled ? 'Kill switch activated.' : 'Kill switch reset.', {}, enabled ? 'critical' : 'info');
   broadcast('kill_switch', { enabled });
@@ -910,6 +1021,23 @@ app.get('/api/signals/outcomes', asyncHandler(async (_req, res) => {
   res.json(await signalOutcomes());
 }));
 
+
+app.get('/api/strategy-lab/summary', asyncHandler(async (_req, res) => {
+  res.json(await strategyLabSummary());
+}));
+
+app.get('/api/strategy-lab/confidence-calibration', asyncHandler(async (_req, res) => {
+  res.json(await confidenceCalibrationReport());
+}));
+
+app.get('/api/strategy-lab/regime-performance', asyncHandler(async (_req, res) => {
+  res.json(await regimePerformance());
+}));
+
+app.post('/api/strategy-lab/simulate-v2', asyncHandler(async (_req, res) => {
+  res.json(await simulateV2AgainstHistory());
+}));
+
 app.get('/api/events', asyncHandler(async (req, res) => {
   res.json(await recentEvents(Number(req.query.limit || 100)));
 }));
@@ -941,7 +1069,7 @@ app.get('/api/market-clock', asyncHandler(async (_req, res) => {
   res.json(clock);
 }));
 
-app.get('/health', (_req, res) => res.json({ ok: true, mode: executionMode() }));
+app.get('/health', (_req, res) => res.json({ ok: databaseStatus().connected, mode: executionMode(), database: databaseStatus() }));
 
 app.use((error, _req, res, _next) => {
   logEvent('error', 'api_error', { message: error.message });
@@ -954,9 +1082,13 @@ attachWebSocket(server);
 server.listen(config.port, () => {
   logEvent('info', 'server_started', { port: config.port, mode: executionMode() });
   emitEvent('System', 'server_started', `SignalFlow backend listening on ${config.port}.`, { port: config.port, mode: executionMode() });
-  startMonitor();
-  startSignalExpirationJob();
-  startSignalOutcomeAnalysisJob();
-  startAutoCryptoScanner();
+  if (databaseStatus().connected) {
+    startMonitor();
+    startSignalExpirationJob();
+    startSignalOutcomeAnalysisJob();
+    startAutoCryptoScanner();
+  } else {
+    emitEvent('System', 'database_unavailable', 'MongoDB unavailable; scanners and monitors were not started.', { database: databaseStatus() }, 'critical');
+  }
   console.log(`SignalFlow backend listening on ${config.port}`);
 });
