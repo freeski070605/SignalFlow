@@ -179,6 +179,136 @@ function Dashboard({ accountData, positions, performance, refresh, monitor, clos
   );
 }
 
+
+function MarketWorkspaceHeader({ page, activeMarket, marketDashboard }) {
+  const label = activeMarket === 'crypto' ? 'Crypto' : activeMarket === 'stocks' ? 'Stocks' : 'Forex';
+  const status = marketDashboard?.adapterStatus?.status || marketDashboard?.adapterStatus?.reason || 'unknown';
+  return (
+    <div className="mb-4 rounded-lg border border-line bg-panel p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-black text-white">{page} — {label}</h2>
+          <p className="text-sm text-slate-400">Active Market: {label}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge tone={activeMarket === 'forex' && !marketDashboard?.adapterStatus?.connected ? 'warn' : 'good'}>{status}</Badge>
+          <Badge tone={marketDashboard?.killSwitch ? 'bad' : 'good'}>{label} Kill Switch: {marketDashboard?.killSwitch ? 'Active' : 'Off'}</Badge>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UnavailableMarketState({ activeMarket, title = 'Workspace' }) {
+  const message = activeMarket === 'forex'
+    ? 'Connect a FOREX.com API-enabled account to activate live forex data.'
+    : `${title} is not available for ${activeMarket}.`;
+  return (
+    <Card title={`${title} — ${activeMarket === 'forex' ? 'Forex' : activeMarket}`} icon={AlertTriangle}>
+      <div className="rounded border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">{message}</div>
+    </Card>
+  );
+}
+
+function GlobalDashboard({ data, activeMarket, setActiveMarket, setTab }) {
+  const markets = data?.markets || {};
+  const go = (market, tab) => { setActiveMarket(market); setTab(tab); };
+  const card = (market, title) => {
+    const row = markets[market] || {};
+    const status = row.adapterStatus?.status || 'unknown';
+    return (
+      <Card title={`${title} Workspace`} icon={market === 'crypto' ? Wallet : market === 'stocks' ? LineChart : Gauge}>
+        <div className="grid grid-cols-2 gap-3">
+          <Metric label="Market" value={title} />
+          <Metric label={market === 'crypto' ? 'Exchange' : 'Broker'} value={row.exchange || row.broker || row.adapterStatus?.broker || '-'} />
+          <Metric label="Status" value={status} tone={String(status).toLowerCase().includes('connected') || status === 'connected' ? 'text-gain' : 'text-amber-300'} />
+          <Metric label="Pending Signals" value={row.pendingSignals || 0} />
+          <Metric label="Open Positions" value={row.openPositions || 0} />
+          <Metric label="Open Risk" value={money(row.openRisk)} />
+          {market === 'crypto' && <Metric label="USD Balance" value={money(row.usdBalance)} />}
+          {market === 'crypto' && <Metric label="Regime" value={row.regime?.regime || 'NEUTRAL'} />}
+          {market === 'stocks' && <Metric label="Equity" value={money(row.accountEquity)} />}
+          {market === 'stocks' && <Metric label="Clock" value={row.marketClock?.is_open ? 'Open' : row.marketClock?.next_open ? 'Closed' : 'Unknown'} />}
+          {market === 'forex' && <Metric label="Balance" value={row.accountBalance === null || row.accountBalance === undefined ? '-' : money(row.accountBalance)} />}
+          {market === 'forex' && <Metric label="Session" value={row.session?.label || '-'} />}
+          <Metric label="Protection" value={row.protectionMode || (market === 'forex' ? 'Locked' : '-')} />
+          <Metric label="Kill Switch" value={row.killSwitch ? 'Active' : 'Off'} tone={row.killSwitch ? 'text-loss' : 'text-gain'} />
+        </div>
+        {row.unavailableMessage && <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-100">{row.unavailableMessage}</div>}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button onClick={() => go(market, 'Scanner')} className="rounded bg-panel2 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-line">View Scanner</button>
+          <button onClick={() => go(market, 'Signals')} className="rounded bg-panel2 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-line">View Signals</button>
+          <button onClick={() => go(market, 'Positions')} className="rounded bg-panel2 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-line">View Positions</button>
+        </div>
+      </Card>
+    );
+  };
+  return (
+    <div className="grid gap-4">
+      <Card title="Global Dashboard" icon={Shield}>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="Active Market" value={activeMarket} />
+          <Metric label="Trading Mode" value={data?.tradingMode || '-'} />
+          <Metric label="Global Kill Switch" value={data?.risk?.globalKillSwitch ? 'Active' : 'Off'} tone={data?.risk?.globalKillSwitch ? 'text-loss' : 'text-gain'} />
+          <Metric label="Monitor Warnings" value={data?.risk?.monitorWarnings || 0} tone={data?.risk?.monitorWarnings ? 'text-loss' : 'text-gain'} />
+          <Metric label="Open Positions" value={data?.risk?.totalOpenPositions || 0} />
+          <Metric label="Pending Signals" value={data?.risk?.totalPendingSignals || 0} />
+          <Metric label="Crypto USD" value={data?.balances?.cryptoUsdBalance == null ? '-' : money(data.balances.cryptoUsdBalance)} />
+          <Metric label="Stock Equity" value={data?.balances?.stockAccountEquity == null ? '-' : money(data.balances.stockAccountEquity)} />
+        </div>
+      </Card>
+      <div className="grid gap-4 lg:grid-cols-3">
+        {card('crypto', 'Crypto')}
+        {card('stocks', 'Stocks')}
+        {card('forex', 'Forex')}
+      </div>
+      <Card title="Active Opportunities Across Markets" icon={Activity}>
+        <div className="grid gap-3 lg:grid-cols-3">
+          <div className="rounded border border-line bg-ink p-3"><div className="font-bold text-white">Crypto near misses</div><div className="text-sm text-slate-400">{markets.crypto?.nearMiss?.history?.length || 0} recent real observations.</div></div>
+          <div className="rounded border border-line bg-ink p-3"><div className="font-bold text-white">Stock near misses</div><div className="text-sm text-slate-400">Available from stock scanner records when present.</div></div>
+          <div className="rounded border border-line bg-ink p-3"><div className="font-bold text-white">Forex opportunities</div><div className="text-sm text-slate-400">Unavailable until FOREX.com real market data is connected. No fake opportunities shown.</div></div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function GenericPositions({ rows, activeMarket }) {
+  return (
+    <Card title={`Positions — ${activeMarket}`} icon={Activity}>
+      <Table columns={['Symbol', 'Qty', 'Market Value', 'P/L', 'Market']} rows={rows || []} render={(row) => (
+        <tr key={row.symbol || row.id}>
+          <td className="px-3 py-2 font-bold">{row.symbol}</td>
+          <td className="px-3 py-2">{row.qty || row.quantity || '-'}</td>
+          <td className="px-3 py-2">{money(row.market_value || row.notional)}</td>
+          <td className={`px-3 py-2 ${Number(row.unrealized_pl || 0) >= 0 ? 'text-gain' : 'text-loss'}`}>{money(row.unrealized_pl)}</td>
+          <td className="px-3 py-2">{row.market_type || activeMarket}</td>
+        </tr>
+      )} />
+    </Card>
+  );
+}
+
+function PerformancePage({ activeMarket, data }) {
+  return (
+    <div className="grid gap-4">
+      <Card title={`Performance — ${activeMarket}`} icon={Gauge}>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="Trades" value={data?.totalTrades || 0} />
+          <Metric label="Win Rate" value={`${Number(data?.winRate || 0).toFixed(1)}%`} />
+          <Metric label="Profit Factor" value={Number(data?.profitFactor || 0).toFixed(2)} />
+          <Metric label="Total P/L" value={money(data?.totalPnl)} tone={Number(data?.totalPnl || 0) >= 0 ? 'text-gain' : 'text-loss'} />
+        </div>
+        {activeMarket === 'forex' && !data?.totalTrades && <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">FOREX.com real trade data is required before forex performance is available.</div>}
+      </Card>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="Strategy Performance" icon={ListChecks}><MiniBars rows={data?.strategy || []} /></Card>
+        <Card title="Symbol Performance" icon={LineChart}><MiniBars rows={data?.symbols || []} /></Card>
+      </div>
+    </div>
+  );
+}
+
 function CryptoDashboard({ data, monitor }) {
   const balances = data?.balances || [];
   const positions = data?.positions || [];
@@ -590,7 +720,7 @@ function CryptoScanner({ scanner, settingsData, strategyData, analytics, runScan
     }
   };
   return (
-    <Card title="Crypto Scanner" icon={LineChart}>
+    <Card title="Scanner — Crypto" icon={LineChart}>
       <div className="mb-4 flex flex-wrap gap-2">
         {Object.keys(presets).map((key) => (
           <button key={key} onClick={() => runScanner(key)} className="rounded bg-panel2 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-line">{key.replaceAll('_', ' ')}</button>
@@ -1542,13 +1672,18 @@ function formatDuration(seconds) {
 }
 
 function ActivityFeed({ events }) {
+  const [scope, setScope] = useState('all');
+  const filtered = scope === 'all' ? events : events.filter((event) => event.market_type === scope || event.payload?.market_type === scope || event.payload?.marketType === scope);
   return (
     <Card title="Live Activity" icon={Activity}>
+      <div className="mb-3 flex flex-wrap gap-2">
+        {['all', 'crypto', 'stocks', 'forex'].map((item) => <button key={item} onClick={() => setScope(item)} className={`rounded px-2 py-1 text-xs font-bold ${scope === item ? 'bg-gain text-ink' : 'bg-panel2 text-slate-300'}`}>{item === 'all' ? 'All Markets' : item}</button>)}
+      </div>
       <div className="max-h-[360px] space-y-2 overflow-y-auto">
-        {events.length === 0 ? <div className="text-sm text-slate-500">No system events yet.</div> : events.map((event) => (
+        {filtered.length === 0 ? <div className="text-sm text-slate-500">No system events yet.</div> : filtered.map((event) => (
           <div key={event.id} className="rounded border border-line bg-ink p-2 text-sm">
             <div className="flex items-center justify-between gap-2">
-              <Badge tone={event.severity === 'critical' ? 'bad' : event.severity === 'warn' ? 'warn' : 'neutral'}>{event.category}</Badge>
+              <div className="flex flex-wrap gap-1"><Badge tone={event.severity === 'critical' ? 'bad' : event.severity === 'warn' ? 'warn' : 'neutral'}>{event.category}</Badge>{(event.market_type || event.payload?.market_type) && <Badge>{event.market_type || event.payload?.market_type}</Badge>}</div>
               <span className="text-xs text-slate-500">{event.created_at}</span>
             </div>
             <div className="mt-1 text-slate-200">{event.message}</div>
@@ -1749,6 +1884,16 @@ function Toast({ toast, onClose }) {
 
 function App() {
   const [tab, setTab] = useState('Dashboard');
+  const [activeMarket, setActiveMarketState] = useState(() => localStorage.getItem('signalflow.activeMarket') || 'crypto');
+  const setActiveMarket = (market) => {
+    setActiveMarketState(market);
+    localStorage.setItem('signalflow.activeMarket', market);
+    api.saveMarketSettings(market, { active_market_selected: market }).catch(() => {});
+  };
+  const [globalDashboardData, setGlobalDashboardData] = useState(null);
+  const [marketDashboardData, setMarketDashboardData] = useState(null);
+  const [marketPerformance, setMarketPerformance] = useState(null);
+  const [marketSettingsData, setMarketSettingsData] = useState(null);
   const [accountData, setAccountData] = useState(null);
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState({ localOrders: [], liveOrders: [] });
@@ -1801,7 +1946,7 @@ function App() {
   const refresh = async () => {
     try {
       setError('');
-      const [account, positionRows, orderRows, signalRows, perf, eventRows, monitorRows, monitorState, marketClock] = await Promise.all([
+      const [account, positionRows, orderRows, signalRows, perf, eventRows, monitorRows, monitorState, marketClock, globalDash, marketDash, marketPerf, marketSettingsResp] = await Promise.all([
         api.account(),
         api.positions(),
         api.orders(),
@@ -1810,7 +1955,11 @@ function App() {
         api.events(),
         api.monitoredPositions(),
         api.monitorStatus(),
-        api.marketClock()
+        api.marketClock(),
+        api.globalDashboard().catch(() => null),
+        api.marketDashboard(activeMarket).catch(() => null),
+        api.marketPerformanceSummary(activeMarket).catch(() => null),
+        api.marketSettings(activeMarket).catch(() => null)
       ]);
       setAccountData(account);
       setPositions(positionRows);
@@ -1821,6 +1970,10 @@ function App() {
       setMonitoredPositions(monitorRows);
       setMonitor(monitorState);
       setClock(marketClock);
+      if (globalDash) setGlobalDashboardData(globalDash);
+      if (marketDash) setMarketDashboardData(marketDash);
+      if (marketPerf) setMarketPerformance(marketPerf);
+      if (marketSettingsResp) setMarketSettingsData(marketSettingsResp);
       setLastLiveUpdate(new Date());
       const lists = await api.watchlists();
       setUniverse(lists.tradingUniverse || []);
@@ -1839,7 +1992,7 @@ function App() {
   const refreshLive = async ({ silent = false } = {}) => {
     try {
       if (!silent) setError('');
-      const [account, positionRows, orderRows, signalRows, monitorRows, monitorState, marketClock, cryptoDash, analytics] = await Promise.all([
+      const [account, positionRows, orderRows, signalRows, monitorRows, monitorState, marketClock, cryptoDash, analytics, globalDash, marketDash] = await Promise.all([
         api.account(),
         api.positions(),
         api.orders(),
@@ -1848,7 +2001,9 @@ function App() {
         api.monitorStatus(),
         api.marketClock(),
         api.cryptoDashboard().catch(() => null),
-        api.nearMissAnalytics().catch(() => null)
+        api.nearMissAnalytics().catch(() => null),
+        api.globalDashboard().catch(() => null),
+        api.marketDashboard(activeMarket).catch(() => null)
       ]);
       setAccountData(account);
       setPositions(positionRows);
@@ -1859,6 +2014,8 @@ function App() {
       setClock(marketClock);
       if (cryptoDash) setCryptoDashboard(cryptoDash);
       if (analytics) setNearMissAnalyticsData(analytics);
+      if (globalDash) setGlobalDashboardData(globalDash);
+      if (marketDash) setMarketDashboardData(marketDash);
       setLastLiveUpdate(new Date());
       refreshJournal().catch(() => {});
     } catch (err) {
@@ -1873,10 +2030,12 @@ function App() {
   const runScanner = async (preset = '') => {
     try {
       setError('');
-      const result = await api.runScanner(preset);
-      setScanner(result);
+      const result = await api.runMarketScanner(activeMarket, preset);
+      if (activeMarket === 'crypto') setCryptoScanner(result);
+      else setScanner(result);
       setUniverse(result.passed || []);
-      setScannerSettingsData(await api.scannerSettings());
+      if (activeMarket === 'crypto') setCryptoScannerSettings(await api.cryptoScannerSettings());
+      else setScannerSettingsData(await api.scannerSettings());
       await refresh();
     } catch (err) {
       setError(err.message);
@@ -1960,6 +2119,20 @@ function App() {
 
   useEffect(() => { refresh(); refreshWatchlist(); }, []);
   useEffect(() => {
+    api.marketDashboard(activeMarket).then(setMarketDashboardData).catch(() => {});
+    api.marketPerformanceSummary(activeMarket).then(setMarketPerformance).catch(() => {});
+    api.marketSettings(activeMarket).then(setMarketSettingsData).catch(() => {});
+    api.marketSignals(activeMarket).then(setSignals).catch(() => {});
+    api.marketPositions(activeMarket).then(setPositions).catch(() => {});
+    api.marketJournal(activeMarket).then(setJournal).catch(() => {});
+    if (activeMarket === 'crypto') {
+      api.cryptoScannerSettings().then(setCryptoScannerSettings).catch(() => {});
+      api.cryptoStrategySettings().then(setCryptoStrategySettings).catch(() => {});
+    } else if (activeMarket === 'stocks') {
+      api.scannerSettings().then(setScannerSettingsData).catch(() => {});
+    }
+  }, [activeMarket]);
+  useEffect(() => {
     let inFlight = false;
     const intervalMs = Number(import.meta.env.VITE_LIVE_REFRESH_MS || 5000);
     const tick = async () => {
@@ -2019,6 +2192,19 @@ function App() {
     };
   }, []);
 
+
+  const isRowMarket = (row, market) => {
+    if (market === 'crypto') return row.market_type === 'crypto' || String(row.symbol || '').includes('-USD');
+    if (market === 'forex') return row.market_type === 'forex';
+    return row.market_type === 'stocks' || (!row.market_type && !String(row.symbol || '').includes('-USD'));
+  };
+  const scopedSignals = signals.filter((row) => isRowMarket(row, activeMarket));
+  const scopedPositions = positions.filter((row) => isRowMarket(row, activeMarket));
+  const scopedJournal = { ...journal, rows: (journal.rows || []).filter((row) => isRowMarket(row, activeMarket)) };
+  const scopedOutcomes = Array.isArray(signalOutcomes)
+    ? signalOutcomes.filter((row) => isRowMarket(row, activeMarket))
+    : { ...(signalOutcomes || {}), rows: (signalOutcomes?.rows || []).filter((row) => isRowMarket(row, activeMarket)) };
+
   return (
     <main className="min-h-screen bg-ink">
       <Toast toast={toast} onClose={() => setToast(null)} />
@@ -2026,7 +2212,19 @@ function App() {
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h1 className="text-2xl font-black tracking-normal text-white">SignalFlow</h1>
-            <p className="text-sm text-slate-400">Crypto-first, market-agnostic trading with manual approval defaults.</p>
+            <p className="text-sm text-slate-400">Global trading operating system with market-scoped workspaces.</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="text-xs uppercase text-slate-500">Market Switcher</span>
+              {['crypto', 'stocks', 'forex'].map((market) => (
+                <button key={market} onClick={() => setActiveMarket(market)} className={`rounded px-3 py-1 text-xs font-bold ${activeMarket === market ? 'bg-gain text-ink' : 'bg-panel2 text-slate-300 hover:bg-line'}`}>{market === 'crypto' ? 'Crypto' : market === 'stocks' ? 'Stocks' : 'Forex'}</button>
+              ))}
+              <Badge tone="good">Active Market: {activeMarket}</Badge>
+              <Badge tone={globalDashboardData?.risk?.globalKillSwitch ? 'bad' : 'good'}>Global Kill Switch: {globalDashboardData?.risk?.globalKillSwitch ? 'Active' : 'Off'}</Badge>
+              <Badge tone={marketDashboardData?.killSwitch ? 'bad' : 'good'}>Market Kill Switch: {marketDashboardData?.killSwitch ? 'Active' : 'Off'}</Badge>
+              <Badge>{marketDashboardData?.adapterStatus?.status || 'connection unknown'}</Badge>
+              <Badge>{globalDashboardData?.tradingMode || accountData?.mode || 'manual'}</Badge>
+              <Badge>{globalDashboardData?.protectionMode || accountData?.sizing?.protectionMode || 'protection'}</Badge>
+            </div>
           </div>
           <nav className="flex flex-wrap gap-2">
             {tabs.map((item) => (

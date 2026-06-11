@@ -23,6 +23,18 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  globalDashboard: () => request('/api/global/dashboard'),
+  marketDashboard: (market) => request(`/api/${market}/dashboard`),
+  marketScannerSettings: (market) => request(`/api/${market}/scanner/settings`),
+  saveMarketScannerSettings: (market, payload) => request(`/api/${market}/scanner/settings`, { method: 'POST', body: JSON.stringify(payload) }),
+  runMarketScanner: (market, preset = '') => request(`/api/${market}/scanner/run${preset ? `?preset=${encodeURIComponent(preset)}` : ''}`, { method: 'POST', body: '{}' }),
+  marketSignals: (market) => request(`/api/${market}/signals`),
+  marketPositions: (market) => request(`/api/${market}/positions`),
+  marketJournal: (market) => request(`/api/${market}/journal`),
+  marketPerformanceSummary: (market) => request(`/api/${market}/performance/summary`),
+  marketStrategyLabSummary: (market) => request(`/api/${market}/strategy-lab/summary`),
+  marketSettings: (market) => request(`/api/${market}/settings`),
+  saveMarketSettings: (market, payload) => request(`/api/${market}/settings`, { method: 'POST', body: JSON.stringify(payload) }),
   account: () => request('/api/account'),
   positions: () => request('/api/positions'),
   closePosition: (symbol) => request(`/api/positions/${symbol}/close`, { method: 'POST', body: JSON.stringify({ reason: 'manual_close' }) }),

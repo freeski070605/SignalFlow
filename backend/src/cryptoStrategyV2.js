@@ -15,6 +15,7 @@ const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 
 export function cryptoStrategyV2Settings(overrides = {}) {
   return {
+    enableLegacyCryptoStrategy: false,
     enableLegacyCryptoStrategy: bool('enable_legacy_crypto_strategy', config.enableLegacyCryptoStrategy),
     blockLongsInBearishRegime: bool('block_longs_in_bearish_regime', config.blockLongsInBearishRegime),
     allowNeutralLongs: bool('allow_neutral_longs', config.allowNeutralLongs),

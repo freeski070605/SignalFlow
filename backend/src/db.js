@@ -1,38 +1,71 @@
 import { MongoClient } from 'mongodb';
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
+import { strategyRegistry } from './strategyRegistry.js';
 
-if (!config.mongodbUri) {
-  throw new Error('MONGODB_URI is required. SignalFlow is configured for MongoDB-only persistence.');
+let mongoConnectionError = null;
+export let mongoClient = null;
+export let mongo = null;
+
+if (config.mongodbUri) {
+  try {
+    mongoClient = new MongoClient(config.mongodbUri, { serverSelectionTimeoutMS: 10000 });
+    await mongoClient.connect();
+    mongo = mongoClient.db(config.mongodbDatabase);
+  } catch (error) {
+    mongoConnectionError = error;
+  }
+} else {
+  mongoConnectionError = new Error('MONGODB_URI is required. SignalFlow uses MongoDB-only persistence.');
 }
 
-export const mongoClient = new MongoClient(config.mongodbUri, { serverSelectionTimeoutMS: 10000 });
-await mongoClient.connect();
+const unavailableCollection = (name) => new Proxy({}, {
+  get: (_target, property) => {
+    if (property === 'collectionName') return name;
+    return () => Promise.reject(new Error(`MongoDB unavailable; cannot access ${name}.${String(property)}.`));
+  }
+});
 
-export const mongo = mongoClient.db(config.mongodbDatabase);
+const collection = (name) => mongo ? mongo.collection(name) : unavailableCollection(name);
+
+export function databaseStatus() {
+  return {
+    connected: Boolean(mongo),
+    database: config.mongodbDatabase,
+    error: mongoConnectionError ? mongoConnectionError.message : null
+  };
+}
 
 export const collections = {
-  users: mongo.collection('users'),
-  settings: mongo.collection('settings'),
-  watchlist: mongo.collection('watchlist'),
-  watchlistGroups: mongo.collection('watchlist_groups'),
-  tradingUniverseCandidates: mongo.collection('trading_universe_candidates'),
-  scannerRuns: mongo.collection('scanner_runs'),
-  scannerRejections: mongo.collection('scanner_rejections'),
-  candidateHistory: mongo.collection('candidate_history'),
-  marketRegime: mongo.collection('market_regime'),
-  monitoredPositions: mongo.collection('monitored_positions'),
-  systemEvents: mongo.collection('system_events'),
-  signals: mongo.collection('signals'),
-  orders: mongo.collection('orders'),
-  positions: mongo.collection('positions'),
-  trades: mongo.collection('trades'),
-  tradeJournal: mongo.collection('trade_journal'),
-  performanceDaily: mongo.collection('performance_daily'),
-  strategyStats: mongo.collection('strategy_stats'),
-  signalOutcomes: mongo.collection('signal_outcomes'),
-  riskEvents: mongo.collection('risk_events'),
-  systemLogs: mongo.collection('system_logs')
+  users: collection('users'),
+  settings: collection('settings'),
+  marketSettings: collection('market_settings'),
+  adapterStatus: collection('adapter_status'),
+  watchlist: collection('watchlist'),
+  watchlistGroups: collection('watchlist_groups'),
+  tradingUniverseCandidates: collection('trading_universe_candidates'),
+  scannerCandidates: collection('scanner_candidates'),
+  scannerRuns: collection('scanner_runs'),
+  scannerRejections: collection('scanner_rejections'),
+  candidateHistory: collection('candidate_history'),
+  nearMissHistory: collection('near_miss_history'),
+  opportunityAlerts: collection('opportunity_alerts'),
+  marketRegime: collection('market_regime'),
+  monitoredPositions: collection('monitored_positions'),
+  systemEvents: collection('system_events'),
+  activityEvents: collection('activity_events'),
+  signals: collection('signals'),
+  orders: collection('orders'),
+  positions: collection('positions'),
+  trades: collection('trades'),
+  tradeJournal: collection('trade_journal'),
+  performanceDaily: collection('performance_daily'),
+  strategyStats: collection('strategy_stats'),
+  strategyRegistry: collection('strategy_registry'),
+  signalOutcomes: collection('signal_outcomes'),
+  killSwitches: collection('kill_switches'),
+  riskEvents: collection('risk_events'),
+  systemLogs: collection('system_logs')
 };
 
 const settingsCache = new Map();
@@ -162,6 +195,22 @@ async function createIndexes() {
     collections.signalOutcomes.createIndex({ signal_id: 1 }, { unique: true }),
     collections.performanceDaily.createIndex({ day: 1 }, { unique: true }),
     collections.strategyStats.createIndex({ strategy_name: 1 }, { unique: true }),
+    collections.signals.createIndex({ market_type: 1, status: 1 }),
+    collections.signals.createIndex({ market_type: 1, symbol: 1 }),
+    collections.signals.createIndex({ market_type: 1, strategy_name: 1 }),
+    collections.signals.createIndex({ market_type: 1, created_at: -1 }),
+    collections.signalOutcomes.createIndex({ market_type: 1, generated_at: -1 }),
+    collections.tradeJournal.createIndex({ market_type: 1, created_at: -1 }),
+    collections.orders.createIndex({ market_type: 1, status: 1 }),
+    collections.positions.createIndex({ market_type: 1, symbol: 1 }),
+    collections.marketSettings.createIndex({ market_type: 1, key: 1 }, { unique: true }),
+    collections.adapterStatus.createIndex({ market_type: 1, adapter_name: 1 }, { unique: true }),
+    collections.scannerCandidates.createIndex({ market_type: 1, scanned_at: -1 }),
+    collections.nearMissHistory.createIndex({ market_type: 1, symbol: 1, created_at: -1 }),
+    collections.opportunityAlerts.createIndex({ market_type: 1, created_at: -1 }),
+    collections.activityEvents.createIndex({ market_type: 1, created_at: -1 }),
+    collections.strategyRegistry.createIndex({ strategy_id: 1 }, { unique: true }),
+    collections.killSwitches.createIndex({ market_type: 1 }, { unique: true }),
     collections.systemLogs.createIndex({ created_at: -1 })
   ]);
 }
@@ -188,7 +237,26 @@ async function seedDefaults() {
     { $setOnInsert: { key, value: String(value), updated_at: nowIso() } },
     { upsert: true }
   )));
+  await Promise.all(['crypto', 'stocks', 'forex'].map((market) => collections.killSwitches.updateOne(
+    { market_type: market },
+    { $setOnInsert: { market_type: market, enabled: market === 'forex', created_at: nowIso(), updated_at: nowIso() } },
+    { upsert: true }
+  )));
+  await Promise.all(strategyRegistry.map((strategy) => collections.strategyRegistry.updateOne(
+    { strategy_id: strategy.strategy_id },
+    { $set: { ...strategy, updated_at: nowIso() }, $setOnInsert: { created_at: nowIso() } },
+    { upsert: true }
+  )));
+  await Promise.all([
+    collections.signals.updateMany({ market_type: { $exists: false }, symbol: /-USD$/ }, { $set: { market_type: 'crypto', adapter_name: 'coinbase', exchange: 'coinbase', updated_at: nowIso() } }),
+    collections.signals.updateMany({ market_type: { $exists: false }, symbol: { $not: /-USD$/ } }, { $set: { market_type: 'stocks', adapter_name: 'alpaca', broker: 'alpaca', exchange: 'alpaca', updated_at: nowIso() } }),
+    collections.tradeJournal.updateMany({ market_type: { $exists: false }, symbol: /-USD$/ }, { $set: { market_type: 'crypto', adapter_name: 'coinbase', exchange: 'coinbase', updated_at: nowIso() } }),
+    collections.tradeJournal.updateMany({ market_type: { $exists: false }, symbol: { $not: /-USD$/ } }, { $set: { market_type: 'stocks', adapter_name: 'alpaca', broker: 'alpaca', exchange: 'alpaca', updated_at: nowIso() } }),
+    collections.signalOutcomes.updateMany({ market_type: { $exists: false }, symbol: /-USD$/ }, { $set: { market_type: 'crypto', adapter_name: 'coinbase', exchange: 'coinbase', updated_at: nowIso() } }),
+    collections.signalOutcomes.updateMany({ market_type: { $exists: false }, symbol: { $not: /-USD$/ } }, { $set: { market_type: 'stocks', adapter_name: 'alpaca', broker: 'alpaca', exchange: 'alpaca', updated_at: nowIso() } })
+  ]);
 }
+
 
 async function loadSettingsCache() {
   settingsCache.clear();
@@ -197,6 +265,7 @@ async function loadSettingsCache() {
 }
 
 export async function migrate() {
+  if (!mongo) return;
   await createIndexes();
   await seedDefaults();
   await loadSettingsCache();

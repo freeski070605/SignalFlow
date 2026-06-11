@@ -313,3 +313,46 @@ Do not include `/v2` in `ALPACA_BASE_URL`. SignalFlow normalizes it if present, 
 Use `ALPACA_DATA_FEED=iex` unless your Alpaca account has SIP market-data access.
 
 This software does not promise profits, does not use leverage, does not trade options or crypto in V1, does not average down, and does not use martingale sizing.
+
+## Deployment readiness: MongoDB + market workspaces
+
+SignalFlow is MongoDB-only. Configure the backend with `MONGODB_URI` and optionally `MONGODB_DB_NAME` (defaults to `signalflow`). The backend connects once at startup, reuses the MongoDB client, and exposes database connection state at `GET /health`. If MongoDB is unavailable, scanners and monitors do not start.
+
+### Render backend
+
+Set backend environment variables in Render, including:
+
+- `MONGODB_URI`
+- `MONGODB_DB_NAME=signalflow`
+- Coinbase/Alpaca/FOREX.com broker credentials only on the backend service
+- `FRONTEND_ORIGIN` for the deployed frontend origin
+
+Do not put broker secrets in frontend environment variables.
+
+### Vercel frontend
+
+Set frontend environment variables in Vercel, including:
+
+- `VITE_API_BASE_URL` pointing at the Render backend
+- `VITE_WS_URL` pointing at the backend websocket endpoint
+
+MongoDB Atlas can be connected to Vercel through Atlas/Vercel integrations, but this app should still keep broker credentials backend-only.
+
+### FOREX.com
+
+Forex is structured around a FOREX.com adapter with read-only/demo-first defaults. Configure these on the backend only when an API-enabled FOREX.com account is available:
+
+- `FOREX_MODULE_ENABLED=true`
+- `FOREX_BROKER=forex.com`
+- `FOREX_TRADING_ENABLED=false`
+- `FOREX_AUTO_EXECUTION=false`
+- `FOREX_API_BASE_URL`
+- `FOREX_STREAM_URL`
+- `FOREX_API_KEY`
+- `FOREX_USERNAME`
+- `FOREX_PASSWORD`
+- `FOREX_ACCOUNT_ID`
+- `FOREX_APP_KEY`
+- `FOREX_ENV=demo`
+
+The forex workspace never fabricates balances, prices, positions, scanner candidates, signals, or trades. If credentials/API access are missing, the UI shows the FOREX.com connection state and clear setup instructions.
