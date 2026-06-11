@@ -79,6 +79,7 @@ export const config = {
   cryptoDailyTradeLimit: num(process.env.CRYPTO_DAILY_TRADE_LIMIT, 10),
   allowCounterRegimeTrades: bool(process.env.ALLOW_COUNTER_REGIME_TRADES, false),
   enableLegacyCryptoStrategy: false,
+  enableLegacyCryptoStrategy: bool(process.env.ENABLE_LEGACY_CRYPTO_STRATEGY, false),
   blockLongsInBearishRegime: bool(process.env.BLOCK_LONGS_IN_BEARISH_REGIME, true),
   allowNeutralLongs: bool(process.env.ALLOW_NEUTRAL_LONGS, false),
   minV2SignalQuality: num(process.env.MIN_V2_SIGNAL_QUALITY, 0.60),

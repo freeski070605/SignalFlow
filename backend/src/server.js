@@ -423,6 +423,8 @@ app.get('/api/crypto/dashboard', asyncHandler(async (_req, res) => {
       currentStrategy: 'V2 Pullback Continuation',
       deprecatedStrategyArchive: 'Archived',
       deprecatedArchiveReason: 'Archived because historical outcomes showed 22/22 would-have-lost signals.',
+      legacyStrategy: getSetting('enable_legacy_crypto_strategy', 'false') === 'true' ? 'Enabled' : 'Disabled',
+      legacyDisabledReason: 'Disabled because historical outcomes showed 22/22 would-have-lost signals.',
       bearishLongBlock: getSetting('block_longs_in_bearish_regime', 'true') === 'true' ? 'Active' : 'Inactive'
     }
   });
