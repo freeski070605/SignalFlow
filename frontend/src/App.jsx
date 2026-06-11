@@ -334,11 +334,11 @@ function CryptoDashboard({ data, monitor }) {
       <Card title="Strategy Status" icon={Shield}>
         <div className="grid grid-cols-2 gap-3">
           <Metric label="Current Strategy" value={data?.strategyStatus?.currentStrategy || 'V2 Pullback Continuation'} />
-          <Metric label="Deprecated Archive" value={data?.strategyStatus?.legacyStrategy || 'Archived'} tone="text-amber-300" />
+          <Metric label="Legacy Strategy" value={data?.strategyStatus?.legacyStrategy || 'Disabled'} tone={(data?.strategyStatus?.legacyStrategy || 'Disabled') === 'Disabled' ? 'text-gain' : 'text-amber-300'} />
           <Metric label="Bearish Long Block" value={data?.strategyStatus?.bearishLongBlock || 'Active'} tone="text-gain" />
           <Metric label="Calibration" value="Outcome-aware" />
         </div>
-        <p className="mt-3 text-xs text-slate-500">{data?.strategyStatus?.legacyDisabledReason || 'Archived because historical outcomes showed 22/22 would-have-lost signals.'}</p>
+        <p className="mt-3 text-xs text-slate-500">{data?.strategyStatus?.legacyDisabledReason || 'Disabled because historical outcomes showed 22/22 would-have-lost signals.'}</p>
       </Card>
       <Card title="Monitor" icon={Activity}>
         <div className="grid grid-cols-2 gap-3">
@@ -608,6 +608,7 @@ function CryptoStrategySettingsPanel({ data, onSave }) {
         <Field label="RSI Max" value={form.rsiMax} onChange={(value) => set('rsiMax', value)} />
         <Field label="Max Signal Spread %" value={form.maxSignalSpreadPercent} onChange={(value) => set('maxSignalSpreadPercent', value)} />
         <Field label="Min Signal Score" value={form.minSignalScore} onChange={(value) => set('minSignalScore', value)} />
+        <Toggle label="Enable Legacy Crypto Strategy" value={form.enableLegacyCryptoStrategy === true || form.enableLegacyCryptoStrategy === 'true'} onChange={(value) => set('enableLegacyCryptoStrategy', value)} />
         <Toggle label="Block Bearish Longs" value={form.blockLongsInBearishRegime !== false && form.blockLongsInBearishRegime !== 'false'} onChange={(value) => set('blockLongsInBearishRegime', value)} />
         <Toggle label="Allow Neutral Longs" value={form.allowNeutralLongs === true || form.allowNeutralLongs === 'true'} onChange={(value) => set('allowNeutralLongs', value)} />
         <Field label="Min V2 Quality" value={form.minV2SignalQuality} onChange={(value) => set('minV2SignalQuality', value)} />
@@ -627,7 +628,7 @@ function CryptoStrategySettingsPanel({ data, onSave }) {
       </div>
       {(form.signalMode === 'discovery' || form.allowCounterRegimeTrades === true || form.allowCounterRegimeTrades === 'true') && (
         <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
-          Deprecated Strategy Archive is historical-analysis-only and cannot generate live signals. Discovery or counter-regime signals are tagged DISCOVERY_RISK and still require manual review plus final risk approval.
+          Legacy V1 is diagnostic-only by default. Discovery or counter-regime signals are tagged DISCOVERY_RISK and still require manual review plus final risk approval.
         </div>
       )}
       <button onClick={() => onSave(form)} className="mt-3 rounded bg-gain px-4 py-2 text-sm font-bold text-ink">Save Strategy Settings</button>
@@ -747,7 +748,7 @@ function CryptoScanner({ scanner, settingsData, strategyData, analytics, runScan
             </div>
           </div>
         )}
-        <Table columns={['Passed', 'Price', '15m', '1h', 'Volume USD', 'Spread', 'Deprecated Pattern Warning', 'V2 Gate', 'V2 Decision', 'Confidence', 'Setup', 'Checklist', 'Inspect']} rows={passed} render={(row) => (
+        <Table columns={['Passed', 'Price', '15m', '1h', 'Volume USD', 'Spread', 'Legacy Gate', 'V2 Gate', 'V2 Decision', 'Confidence', 'Setup', 'Checklist', 'Inspect']} rows={passed} render={(row) => (
           <tr key={`crypto-pass-${row.symbol}`}>
             <td className="px-3 py-2 font-bold">{row.symbol}</td>
             <td className="px-3 py-2">{money(row.price)}</td>
@@ -755,7 +756,7 @@ function CryptoScanner({ scanner, settingsData, strategyData, analytics, runScan
             <td className="px-3 py-2">{pct(row.percent_change_1h)}</td>
             <td className="px-3 py-2">{money(row.volume)}</td>
             <td className="px-3 py-2">{pct(row.spread_percent)}</td>
-            <td className="px-3 py-2"><Badge tone="warn">{row.legacy_strategy_label || 'deprecated pattern warning'}</Badge></td>
+            <td className="px-3 py-2"><Badge tone="warn">{row.legacy_strategy_label || 'legacy diagnostic only'}</Badge></td>
             <td className="px-3 py-2"><Badge tone={row.v2_gate?.decision === 'allowed' ? 'good' : 'bad'}>{row.v2_gate?.decision === 'allowed' ? 'V2 PASSED' : `BLOCKED: ${(row.v2_gate?.failedGates?.[0]?.key || 'conditions').replaceAll('_', ' ').toUpperCase()}`}</Badge></td>
             <td className="px-3 py-2"><div className="max-w-xs text-xs text-slate-400">{row.v2_gate?.block_reason || row.signal_generation_reason || '-'}</div></td>
             <td className="px-3 py-2"><div>{Number(row.v2_gate?.calibrated_signal_quality_score || row.calibrated_signal_quality_score || 0).toFixed(2)}</div><div className="text-xs text-amber-300">{row.v2_gate?.confidence_cap_reason || row.confidence_cap_reason || ''}</div></td>
@@ -1586,15 +1587,15 @@ function StrategyLab({ data, onRefresh, onSimulate }) {
         <div className="mb-4 flex flex-wrap gap-2">
           <button onClick={onRefresh} className="rounded bg-gain px-3 py-2 text-sm font-bold text-ink">Refresh Lab</button>
           <button onClick={onSimulate} className="rounded border border-line px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-panel2">Run V2 Simulation</button>
-          <Badge tone="warn">Deprecated Strategy Archive</Badge>
+          <Badge tone="warn">Legacy Strategy: Disabled</Badge>
           <Badge tone="good">Bearish Long Block: Active</Badge>
         </div>
-        <p className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">Archived because historical outcomes showed 22/22 would-have-lost signals. Strategy V2 is designed to say “No trade. Conditions are not proven.” when evidence is incomplete.</p>
+        <p className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">Disabled because historical outcomes showed 22/22 would-have-lost signals. Strategy V2 is designed to say “No trade. Conditions are not proven.” when evidence is incomplete.</p>
       </Card>
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Deprecated Strategy Failure Report" icon={AlertTriangle}>
+        <Card title="Legacy Strategy Report" icon={AlertTriangle}>
           <div className="grid grid-cols-2 gap-3">
-            <Metric label="Archived Signals" value={legacy.totalLegacySignals ?? legacy.signalCount ?? 0} />
+            <Metric label="Total Legacy Signals" value={legacy.totalLegacySignals ?? legacy.signalCount ?? 0} />
             <Metric label="Would Have Won" value={legacy.wouldHaveWonCount || 0} tone="text-gain" />
             <Metric label="Would Have Lost" value={legacy.wouldHaveLostCount || 0} tone="text-loss" />
             <Metric label="Win Rate" value={`${Number((legacy.winRate || 0) * 100).toFixed(1)}%`} />
@@ -1925,7 +1926,7 @@ function App() {
   const [closeStatuses, setCloseStatuses] = useState({});
   const [toast, setToast] = useState(null);
 
-  const tabs = useMemo(() => ['Dashboard', 'Scanner', 'Signals', 'Positions', 'Journal', 'Performance', 'Strategy Lab', 'Settings'], []);
+  const tabs = useMemo(() => ['Dashboard', 'Crypto Scanner', 'Strategy Lab', 'Signals', 'Positions', 'Journal', 'Settings', 'Stocks Module'], []);
   const refreshJournal = async () => {
     const [journalRows, summary, dailyRows, strategyRows, symbolRows, outcomes] = await Promise.all([
       api.journal(),
@@ -2074,7 +2075,7 @@ function App() {
   const debugCryptoSignal = (runId, symbol) => api.debugCryptoSignal({ runId, symbol });
   const simulateCryptoSignalModes = (runId) => api.simulateCryptoSignalModes({ runId });
   const refreshStrategyLab = async () => {
-    setStrategyLab(await api.marketStrategyLabSummary(activeMarket));
+    setStrategyLab(await api.strategyLabSummary());
   };
 
   const simulateStrategyV2 = async () => {
@@ -2237,21 +2238,14 @@ function App() {
       <div className="mx-auto grid max-w-7xl gap-4 px-4 py-5 xl:grid-cols-[1fr_340px]">
         <div>
         {error && <div className="mb-4 rounded border border-loss bg-loss/10 p-3 text-sm text-rose-200">{error}</div>}
-        {tab === 'Dashboard' && <GlobalDashboard data={globalDashboardData} activeMarket={activeMarket} setActiveMarket={setActiveMarket} setTab={setTab} />}
-        {tab !== 'Dashboard' && <MarketWorkspaceHeader page={tab} activeMarket={activeMarket} marketDashboard={marketDashboardData} />}
-        {tab === 'Scanner' && activeMarket === 'crypto' && <CryptoScanner scanner={cryptoScanner} settingsData={cryptoScannerSettings} strategyData={cryptoStrategySettings} analytics={nearMissAnalyticsData} runScanner={runCryptoScanner} saveStrategySettings={saveCryptoStrategySettings} debugSignal={debugCryptoSignal} simulateModes={simulateCryptoSignalModes} />}
-        {tab === 'Scanner' && activeMarket === 'stocks' && <Watchlist rows={watchlist} universe={universe} scanner={scanner} scannerSettingsData={scannerSettingsData} blocked={blocked} refresh={refreshWatchlist} runScanner={runScanner} saveScannerSettings={saveScannerSettings} relaxScannerSettings={relaxScannerSettings} block={block} unblock={unblock} />}
-        {tab === 'Scanner' && activeMarket === 'forex' && <UnavailableMarketState activeMarket={activeMarket} title="Scanner" />}
-        {tab === 'Signals' && <Signals signals={scopedSignals} refresh={refresh} scan={refreshWatchlist} accountData={{ ...accountData, marketRegime: marketDashboardData?.regime || accountData?.marketRegime }} />}
-        {tab === 'Positions' && activeMarket === 'crypto' && <CryptoPositions positions={scopedPositions} monitorRows={monitoredPositions} refresh={refresh} />}
-        {tab === 'Positions' && activeMarket === 'stocks' && <GenericPositions rows={scopedPositions} activeMarket={activeMarket} />}
-        {tab === 'Positions' && activeMarket === 'forex' && <UnavailableMarketState activeMarket={activeMarket} title="Positions" />}
-        {tab === 'Journal' && <Journal journal={scopedJournal} summary={performanceSummary} daily={performanceDaily} strategy={performanceStrategy} symbols={performanceSymbols} outcomes={scopedOutcomes} refreshJournal={refreshJournal} />}
-        {tab === 'Performance' && <PerformancePage activeMarket={activeMarket} data={marketPerformance} />}
-        {tab === 'Strategy Lab' && activeMarket === 'crypto' && <StrategyLab data={strategyLab} onRefresh={refreshStrategyLab} onSimulate={simulateStrategyV2} />}
-        {tab === 'Strategy Lab' && activeMarket !== 'crypto' && <Card title={`Strategy Lab — ${activeMarket}`} icon={Gauge}><div className="rounded border border-line bg-ink p-3 text-sm text-slate-300">{marketSettingsData?.message || (activeMarket === 'forex' ? 'FOREX.com adapter state and real data are required before forex strategy statistics are available. No fake stats are shown.' : 'Stock strategy outcomes and simulations will appear here when real stock strategy records exist.')}</div><div className="mt-3 flex flex-wrap gap-2">{(marketSettingsData?.strategy?.strategies || []).map((row) => <Badge key={row.strategy_id} tone={row.status === 'unavailable' ? 'warn' : row.status === 'active' ? 'good' : 'neutral'}>{row.display_name}: {row.status}</Badge>)}</div></Card>}
-        {tab === 'Settings' && <div className="grid gap-4"><LiveReadinessChecklist accountData={accountData} monitor={monitor} /><Card title="Global Settings" icon={Settings}><div className="grid gap-3 md:grid-cols-3"><Metric label="Default Market" value="crypto" /><Metric label="Active Market" value={activeMarket} /><Metric label="Event Feed Scope" value="All Markets" /></div></Card>{activeMarket === 'crypto' ? <StrategySettings accountData={accountData} refresh={refresh} /> : <Card title={`Market Settings — ${activeMarket}`} icon={Settings}><div className="grid gap-3 md:grid-cols-2"><Metric label="Adapter Status" value={marketSettingsData?.adapterStatus?.status || '-'} /><Metric label="Broker/Exchange" value={marketDashboardData?.broker || marketDashboardData?.exchange || '-'} /><Metric label="Kill Switch" value={marketDashboardData?.killSwitch ? 'Active' : 'Off'} /><Metric label="Strategy Count" value={(marketSettingsData?.strategy?.strategies || []).length} /></div>{activeMarket === 'forex' && <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">Connect a FOREX.com API-enabled account to activate live forex data. Forex trading and auto-execution remain disabled by default.</div>}</Card>}</div>}
-
+        {tab === 'Dashboard' && <CryptoDashboard data={cryptoDashboard} monitor={monitor} />}
+        {tab === 'Crypto Scanner' && <CryptoScanner scanner={cryptoScanner} settingsData={cryptoScannerSettings} strategyData={cryptoStrategySettings} analytics={nearMissAnalyticsData} runScanner={runCryptoScanner} saveStrategySettings={saveCryptoStrategySettings} debugSignal={debugCryptoSignal} simulateModes={simulateCryptoSignalModes} />}
+        {tab === 'Strategy Lab' && <StrategyLab data={strategyLab} onRefresh={refreshStrategyLab} onSimulate={simulateStrategyV2} />}
+        {tab === 'Signals' && <Signals signals={signals} refresh={refresh} scan={refreshWatchlist} accountData={accountData} />}
+        {tab === 'Positions' && <CryptoPositions positions={positions.filter((row) => row.market_type === 'crypto' || String(row.symbol || '').includes('-USD'))} monitorRows={monitoredPositions} refresh={refresh} />}
+        {tab === 'Journal' && <Journal journal={journal} summary={performanceSummary} daily={performanceDaily} strategy={performanceStrategy} symbols={performanceSymbols} outcomes={signalOutcomes} refreshJournal={refreshJournal} />}
+        {tab === 'Settings' && <div className="grid gap-4"><LiveReadinessChecklist accountData={accountData} monitor={monitor} /><StrategySettings accountData={accountData} refresh={refresh} /></div>}
+        {tab === 'Stocks Module' && <div className="grid gap-4"><Dashboard accountData={accountData} positions={positions} performance={performance} refresh={refresh} monitor={monitor} closeStatuses={closeStatuses} onClosePosition={closePosition} /><Watchlist rows={watchlist} universe={universe} scanner={scanner} scannerSettingsData={scannerSettingsData} blocked={blocked} refresh={refreshWatchlist} runScanner={runScanner} saveScannerSettings={saveScannerSettings} relaxScannerSettings={relaxScannerSettings} block={block} unblock={unblock} /><Trades orders={orders} performance={performance} /></div>}
         </div>
         <ActivityFeed events={events} />
       </div>
