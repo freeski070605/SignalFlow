@@ -2146,7 +2146,7 @@ function App() {
     };
     const interval = window.setInterval(tick, Math.max(2000, intervalMs));
     return () => window.clearInterval(interval);
-  }, []);
+  }, [activeMarket]);
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
     ws.onopen = () => setWsConnected(true);
@@ -2190,7 +2190,20 @@ function App() {
       setWsConnected(false);
       ws.close();
     };
-  }, []);
+  }, [activeMarket]);
+
+
+  const isRowMarket = (row, market) => {
+    if (market === 'crypto') return row.market_type === 'crypto' || String(row.symbol || '').includes('-USD');
+    if (market === 'forex') return row.market_type === 'forex';
+    return row.market_type === 'stocks' || (!row.market_type && !String(row.symbol || '').includes('-USD'));
+  };
+  const scopedSignals = signals.filter((row) => isRowMarket(row, activeMarket));
+  const scopedPositions = positions.filter((row) => isRowMarket(row, activeMarket));
+  const scopedJournal = { ...journal, rows: (journal.rows || []).filter((row) => isRowMarket(row, activeMarket)) };
+  const marketScopedOutcomes = Array.isArray(signalOutcomes)
+    ? signalOutcomes.filter((row) => isRowMarket(row, activeMarket))
+    : { ...(signalOutcomes || {}), rows: (signalOutcomes?.rows || []).filter((row) => isRowMarket(row, activeMarket)) };
 
 
   const isRowMarket = (row, market) => {
