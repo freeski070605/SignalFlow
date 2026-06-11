@@ -1,22 +1,16 @@
-import { alpacaStockAdapter } from './alpacaStockAdapter.js';
-import { coinbaseCryptoAdapter } from './coinbaseCryptoAdapter.js';
+export { marketAdapterContract } from './MarketAdapter.js';
+export { alpacaStockAdapter } from './alpacaStockAdapter.js';
+export { coinbaseCryptoAdapter } from './coinbaseCryptoAdapter.js';
+export { forexComAdapter } from './forexComAdapter.js';
+export { allowedMarkets, marketRegistry, normalizeMarket, marketInfo, requireMarket, getMarketAdapter } from './adapterRegistry.js';
+
 import { config } from '../config.js';
+import { getMarketAdapter } from './adapterRegistry.js';
 
-export const adapters = {
-  stocks: {
-    alpaca: alpacaStockAdapter
-  },
-  crypto: {
-    coinbase: coinbaseCryptoAdapter
-  }
-};
-
-export function getAdapter(marketType = config.primaryMarket, exchange = config.activeExchange) {
-  if (marketType === 'stocks') return adapters.stocks.alpaca;
-  if (marketType === 'crypto') return adapters.crypto[exchange] || adapters.crypto.coinbase;
-  throw new Error(`No adapter configured for ${marketType}/${exchange}`);
+export function getAdapter(marketType = config.primaryMarket) {
+  return getMarketAdapter(marketType);
 }
 
 export function activeAdapter() {
-  return getAdapter(config.primaryMarket, config.activeExchange);
+  return getAdapter(config.primaryMarket);
 }
